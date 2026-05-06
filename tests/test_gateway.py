@@ -108,6 +108,16 @@ def test_streaming_dispatcher_returns_503_without_worker(tmp_path):
     assert "no healthy worker" in response.json()["detail"]
 
 
+def test_chat_page_returns_basic_ui(tmp_path):
+    with make_client(tmp_path, api_key="api-key") as client:
+        response = client.get("/chat")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Kaggle Host LLM" in response.text
+    assert "/v1/chat/completions" in response.text
+
+
 def test_non_streaming_completion_routes_to_worker(tmp_path):
     with make_client(tmp_path, worker_token="secret") as client:
         websocket_ctx, ws = register_worker(client, token="secret")

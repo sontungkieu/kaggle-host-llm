@@ -4,8 +4,9 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
+from .chat_ui import CHAT_HTML
 from .dispatcher import Dispatcher
 from .openai_models import ChatCompletionRequest
 from .registry import WorkerRegistry
@@ -68,6 +69,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "active_workers": len(live_nodes),
             "workers": nodes,
         }
+
+    @app.get("/chat", response_class=HTMLResponse)
+    async def chat_page() -> HTMLResponse:
+        return HTMLResponse(CHAT_HTML)
 
     @app.get("/workers/live")
     async def live_workers(_: None = Depends(require_api_key)) -> dict[str, object]:

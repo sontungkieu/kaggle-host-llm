@@ -59,7 +59,25 @@ wss://your-domain.example/workers/connect?token=<WORKER_SHARED_TOKEN>
 
 ## Cloudflare Tunnel
 
-Create a tunnel from the always-on gateway host to the local Uvicorn port:
+For stable use, configure a named Cloudflare Tunnel and route a hostname to `http://127.0.0.1:8000`. Store the tunnel token in `.secrets/.env`:
+
+```bash
+TOKEN_CUA_TUNNEL=<cloudflare-named-tunnel-token>
+GATEWAY_PUBLIC_HOSTNAME=hostllm.ccat.io.vn
+GATEWAY_PUBLIC_URL=https://hostllm.ccat.io.vn
+GATEWAY_WS_URL=wss://hostllm.ccat.io.vn/workers/connect
+GATEWAY_HEALTH_URL=https://hostllm.ccat.io.vn/health
+```
+
+Start the named tunnel:
+
+```bash
+uv run python scripts/start_named_tunnel.py
+```
+
+The wrapper reads `TOKEN_CUA_TUNNEL` from `.secrets/.env` and passes it to `cloudflared` through the `TUNNEL_TOKEN` environment variable.
+
+For quick experiments, create a temporary tunnel from the always-on gateway host to the local Uvicorn port:
 
 ```bash
 uv run python scripts/start_quick_tunnel.py
@@ -76,7 +94,7 @@ GATEWAY_HEALTH_URL=https://<generated>.trycloudflare.com/health
 
 When a Quick Tunnel is recreated, rerun `scripts/start_quick_tunnel.py` first, then push or repush Kaggle workers so their embedded `GATEWAY_WS_URL` points at the new hostname. Already-running notebooks that only know the old dead tunnel cannot be contacted unless they were built with a separate stable bootstrap URL.
 
-For stable use, configure a named Cloudflare Tunnel and route a hostname to `http://localhost:8000`. Quick Tunnels can fail or change URL when restarted. If you expose the gateway directly through a public IP and plain HTTP, set `GATEWAY_WS_URL=ws://PUBLIC_IP:8000/workers/connect` instead of `wss://...`.
+Quick Tunnels can fail or change URL when restarted. If you expose the gateway directly through a public IP and plain HTTP, set `GATEWAY_WS_URL=ws://PUBLIC_IP:8000/workers/connect` instead of `wss://...`.
 
 ## API
 
@@ -85,6 +103,17 @@ Health:
 ```bash
 curl http://localhost:8000/health
 ```
+
+Basic browser chat UI:
+
+```text
+http://localhost:8000/chat
+https://hostllm.ccat.io.vn/chat
+```
+
+If `GATEWAY_API_KEY` is configured, paste that value into the Gateway API key field in the chat sidebar. The browser stores this setting in local storage only.
+
+The chat UI keeps conversation context in browser local storage and sends the full visible message history with each `/v1/chat/completions` request. Use **Clear** to start a fresh conversation.
 
 Live worker file and root control:
 
