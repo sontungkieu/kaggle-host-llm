@@ -22,6 +22,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     dispatcher = Dispatcher(
         registry,
         job_timeout_seconds=resolved_settings.job_timeout_seconds,
+        groq_key_file=resolved_settings.groq_key_file,
+        groq_base_url=resolved_settings.groq_base_url,
     )
 
     @asynccontextmanager
@@ -67,6 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "ok": True,
             "active_workers": len(live_nodes),
+            "groq_available": dispatcher.groq_client.has_keys(),
             "workers": nodes,
         }
 

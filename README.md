@@ -30,12 +30,14 @@ WORKER_SHARED_TOKEN=change-me-worker-token
 HEARTBEAT_TIMEOUT_SECONDS=45
 ALIVE_CHECK_INTERVAL_SECONDS=300
 JOB_TIMEOUT_SECONDS=600
+GROQ_KEY_FILE=.secrets/groq_key.env
+GROQ_BASE_URL=https://api.groq.com/openai/v1
 GATEWAY_PUBLIC_HOSTNAME=your-domain.example
 GATEWAY_PUBLIC_URL=https://your-domain.example
 GATEWAY_WS_URL=wss://your-domain.example/workers/connect
 GATEWAY_HEALTH_URL=https://your-domain.example/health
 SERVED_MODEL=qwen2.5-9b-quantized
-WORKER_BACKEND=transformers
+WORKER_BACKEND=vllm
 MODEL_ID=Qwen/Qwen2.5-7B-Instruct
 LOAD_IN_4BIT=true
 HF_TOKEN=
@@ -122,7 +124,7 @@ https://hostllm.ccat.io.vn/chat
 If `GATEWAY_API_KEY` is configured, paste that value into the Gateway API key field in the chat sidebar. The browser stores this setting in local storage only.
 
 The chat UI keeps conversation context in browser local storage and sends the full visible message history with each `/v1/chat/completions` request. Use **Clear** to start a fresh conversation.
-Assistant replies include a small local timing line with response seconds and approximate completion `tok/s` based on the gateway `usage.completion_tokens` value.
+Assistant replies stream into the browser and include a small local timing line with response seconds and approximate completion `tok/s` based on gateway usage when available, or a local estimate otherwise. Image URL and local image attachments are supported for Groq vision routes.
 
 Live worker file and root control:
 
@@ -170,6 +172,55 @@ Streaming uses standard server-sent events:
 {"model":"qwen2.5-9b-quantized","messages":[{"role":"user","content":"hello"}],"stream":true}
 ```
 
+### Groq routes
+
+Store Groq API keys in `.secrets/groq_key.env`; the file is ignored by git. The gateway reads this file directly and round-robins requests across all keys it finds:
+
+```bash
+GROQ_API_KEYS=gsk_first,gsk_second
+
+# or labeled keys
+kieusontung8=gsk_third
+
+# or one key per line
+gsk_fourth
+```
+
+Any user message that starts with `groq:<model>` bypasses Kaggle workers and is sent to Groq's OpenAI-compatible chat completions API. The prefix is stripped before forwarding:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $GATEWAY_API_KEY" \
+  -d '{
+    "model": "qwen2.5-9b-quantized",
+    "messages": [
+      {"role": "user", "content": "groq:llama-3.3-70b-versatile Say OK only."}
+    ],
+    "stream": true
+  }'
+```
+
+For images, use a Groq vision model and OpenAI content parts:
+
+```json
+{
+  "model": "qwen2.5-9b-quantized",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "groq:meta-llama/llama-4-scout-17b-16e-instruct Describe this image."},
+        {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}}
+      ]
+    }
+  ],
+  "stream": true
+}
+```
+
+Image requests without a `groq:<vision-model>` prefix are rejected with HTTP 400 because the current Kaggle worker path is text-only.
+
 ## Kaggle Worker
 
 The notebook template is [notebooks/kaggle_qwen_worker.ipynb](notebooks/kaggle_qwen_worker.ipynb). Set these variables in the Kaggle notebook environment or edit the setup cell:
@@ -178,7 +229,7 @@ The notebook template is [notebooks/kaggle_qwen_worker.ipynb](notebooks/kaggle_q
 GATEWAY_WS_URL=wss://your-domain.example/workers/connect
 WORKER_TOKEN=<WORKER_SHARED_TOKEN>
 SERVED_MODEL=qwen2.5-9b-quantized
-WORKER_BACKEND=transformers
+WORKER_BACKEND=vllm
 MODEL_ID=Qwen/Qwen2.5-7B-Instruct
 LOAD_IN_4BIT=true
 HF_TOKEN=
@@ -193,9 +244,9 @@ VLLM_MAX_MODEL_LEN=4096
 VLLM_GPU_MEMORY_UTILIZATION=0.88
 ```
 
-`SERVED_MODEL` is the name clients request through `/v1/chat/completions`. `WORKER_BACKEND=transformers` keeps the original local `transformers.generate()` path with optional 4-bit `bitsandbytes`. `WORKER_BACKEND=vllm` starts a local vLLM OpenAI-compatible server inside the notebook and forwards gateway jobs to `http://127.0.0.1:8001/v1/chat/completions`; this keeps vLLM private inside Kaggle and preserves the outbound WebSocket architecture. For vLLM on T4x2, prefer AWQ/GPTQ checkpoints and keep `VLLM_MAX_MODEL_LEN` conservative, for example `4096`, to avoid OOM.
+`SERVED_MODEL` is the name clients request through `/v1/chat/completions`. `WORKER_BACKEND=vllm` starts a local vLLM OpenAI-compatible server inside the notebook and forwards gateway jobs to `http://127.0.0.1:8001/v1/chat/completions`; this keeps vLLM private inside Kaggle and preserves the outbound WebSocket architecture. For vLLM on T4x2, prefer AWQ/GPTQ checkpoints and keep `VLLM_MAX_MODEL_LEN` conservative, for example `4096`, to avoid OOM. `WORKER_BACKEND=transformers` remains available only as an explicit legacy backend; it is no longer the default.
 
-`MODEL_ID` is the model used by the transformers backend. `VLLM_MODEL_ID` is the model used by the vLLM backend. `HF_TOKEN` is optional but helps with Hugging Face rate limits. `MAX_WORKER_JOBS=auto` registers capacity 1 for the transformers backend and one concurrent slot per detected GPU for vLLM, so a T4x2 vLLM notebook registers capacity 2. The worker loop accepts multiple jobs concurrently up to that capacity and streams responses back over the single WebSocket.
+`MODEL_ID` is used only by the legacy transformers backend. `VLLM_MODEL_ID` is the model used by the vLLM backend. `HF_TOKEN` is optional but helps with Hugging Face rate limits. `MAX_WORKER_JOBS=auto` registers one concurrent slot per detected GPU for vLLM, so a T4x2 vLLM notebook registers capacity 2. The worker loop accepts multiple jobs concurrently up to that capacity and streams responses back over the single WebSocket.
 The wrapper pushes with `--accelerator NvidiaTeslaT4` by default. P100 can fail with current Kaggle PyTorch images because that build does not support CUDA `sm_60`.
 
 Create a git-ignored staging folder for Kaggle:

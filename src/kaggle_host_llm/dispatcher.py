@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
+from .groq_client import GroqClient, parse_groq_route
 from .openai_models import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -17,16 +18,35 @@ from .openai_models import (
     ChatMessage,
     chunk_payload,
     estimate_usage,
+    message_has_image,
 )
 from .registry import WorkerRegistry
 
 
 class Dispatcher:
-    def __init__(self, registry: WorkerRegistry, job_timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        registry: WorkerRegistry,
+        job_timeout_seconds: float,
+        *,
+        groq_key_file: str = ".secrets/groq_key.env",
+        groq_base_url: str = "https://api.groq.com/openai/v1",
+        groq_client: GroqClient | None = None,
+    ) -> None:
         self.registry = registry
         self.job_timeout_seconds = job_timeout_seconds
+        self.groq_client = groq_client or GroqClient(
+            key_file=groq_key_file,
+            base_url=groq_base_url,
+            timeout_seconds=job_timeout_seconds,
+        )
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        groq_route = parse_groq_route(request)
+        if groq_route is not None:
+            return await self.groq_client.complete(groq_route)
+
+        self._ensure_worker_compatible(request)
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
         job_id, worker, pending = await self._send_job(request)
@@ -82,6 +102,11 @@ class Dispatcher:
         )
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[str]:
+        groq_route = parse_groq_route(request)
+        if groq_route is not None:
+            return self.groq_client.stream(groq_route)
+
+        self._ensure_worker_compatible(request)
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
         job_id, worker, pending = await self._send_job(request)
@@ -159,7 +184,7 @@ class Dispatcher:
             "type": "job",
             "job_id": job_id,
             "model": request.model,
-            "messages": [message.model_dump() for message in request.messages],
+            "messages": [message.model_dump(mode="json") for message in request.messages],
             "temperature": request.temperature,
             "top_p": request.top_p,
             "max_tokens": request.max_tokens,
@@ -176,6 +201,17 @@ class Dispatcher:
                 detail="failed to send job to worker",
             ) from exc
         return job_id, worker, pending
+
+    @staticmethod
+    def _ensure_worker_compatible(request: ChatCompletionRequest) -> None:
+        if any(message_has_image(message.content) for message in request.messages):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "image input requires a Groq vision route; prefix the user message "
+                    "with groq:<vision-model>"
+                ),
+            )
 
 
 def parse_worker_usage(message: dict[str, Any]) -> ChatCompletionUsage | None:

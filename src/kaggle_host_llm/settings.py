@@ -18,6 +18,8 @@ class Settings:
     heartbeat_timeout_seconds: float = 45.0
     alive_check_interval_seconds: float = 300.0
     job_timeout_seconds: float = 600.0
+    groq_key_file: str = ".secrets/groq_key.env"
+    groq_base_url: str = "https://api.groq.com/openai/v1"
     app_name: str = "kaggle-host-llm"
 
     @classmethod
@@ -33,6 +35,8 @@ class Settings:
             heartbeat_timeout_seconds=float(os.getenv("HEARTBEAT_TIMEOUT_SECONDS", "45")),
             alive_check_interval_seconds=float(os.getenv("ALIVE_CHECK_INTERVAL_SECONDS", "300")),
             job_timeout_seconds=float(os.getenv("JOB_TIMEOUT_SECONDS", "600")),
+            groq_key_file=os.getenv("GROQ_KEY_FILE", ".secrets/groq_key.env"),
+            groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
             app_name=os.getenv("APP_NAME", "kaggle-host-llm"),
         )
 

@@ -269,6 +269,90 @@ CHAT_HTML = """<!doctype html>
       resize: vertical;
     }
 
+    .composer-fields {
+      min-width: 0;
+    }
+
+    .attachment-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px;
+      margin-top: 10px;
+      align-items: center;
+    }
+
+    .file-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 40px;
+      margin: 0;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 650;
+      padding: 9px 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .file-button:hover {
+      border-color: #b8c0cc;
+      background: #f9fafb;
+    }
+
+    .hidden-input {
+      display: none;
+    }
+
+    .attachments,
+    .message-images {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .attachment {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      max-width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      padding: 6px 8px 6px 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .attachment img,
+    .message-images img {
+      width: 56px;
+      height: 42px;
+      border-radius: 6px;
+      object-fit: cover;
+      border: 1px solid var(--border);
+      background: var(--surface-2);
+    }
+
+    .message-images {
+      padding: 0 12px 12px;
+    }
+
+    .message-images img {
+      width: 120px;
+      height: 88px;
+    }
+
+    .remove-attachment {
+      min-height: 28px;
+      padding: 3px 8px;
+      font-size: 12px;
+    }
+
     .error {
       margin-top: 12px;
       color: var(--danger);
@@ -367,7 +451,15 @@ CHAT_HTML = """<!doctype html>
 
       <form id="chatForm" class="composer">
         <div class="composer-inner">
-          <textarea id="prompt" placeholder="Type a message" required></textarea>
+          <div class="composer-fields">
+            <textarea id="prompt" placeholder="Type a message"></textarea>
+            <div class="attachment-row">
+              <input id="imageUrl" type="url" placeholder="Image URL">
+              <label class="file-button" for="imageFiles">Attach image</label>
+              <input id="imageFiles" class="hidden-input" type="file" accept="image/*" multiple>
+            </div>
+            <div id="attachments" class="attachments"></div>
+          </div>
           <button id="send" class="primary" type="submit">Send</button>
         </div>
         <div id="error" class="error" role="alert"></div>
@@ -379,11 +471,13 @@ CHAT_HTML = """<!doctype html>
     const state = {
       messages: [],
       busy: false,
+      pendingImages: [],
     };
 
     const settingsStorageKey = "kaggleHostChatSettings";
     const historyStorageKey = "kaggleHostChatHistory";
     const maxStoredMessages = 100;
+    const maxInlineImageBytes = 3 * 1024 * 1024;
 
     const els = {
       apiKey: document.getElementById("apiKey"),
@@ -392,6 +486,9 @@ CHAT_HTML = """<!doctype html>
       temperature: document.getElementById("temperature"),
       topP: document.getElementById("topP"),
       prompt: document.getElementById("prompt"),
+      imageUrl: document.getElementById("imageUrl"),
+      imageFiles: document.getElementById("imageFiles"),
+      attachments: document.getElementById("attachments"),
       messages: document.getElementById("messages"),
       form: document.getElementById("chatForm"),
       send: document.getElementById("send"),
@@ -425,6 +522,61 @@ CHAT_HTML = """<!doctype html>
       );
     }
 
+    function isTextPart(part) {
+      return part && part.type === "text" && typeof part.text === "string";
+    }
+
+    function isImagePart(part) {
+      return (
+        part &&
+        part.type === "image_url" &&
+        part.image_url &&
+        typeof part.image_url.url === "string" &&
+        part.image_url.url.length > 0
+      );
+    }
+
+    function isMessageContent(content) {
+      if (typeof content === "string") {
+        return true;
+      }
+      if (!Array.isArray(content)) {
+        return false;
+      }
+      return content.every((part) => isTextPart(part) || isImagePart(part));
+    }
+
+    function cloneContent(content) {
+      if (typeof content === "string") {
+        return content;
+      }
+      return content.map((part) => {
+        if (isTextPart(part)) {
+          return { type: "text", text: part.text };
+        }
+        return { type: "image_url", image_url: { url: part.image_url.url } };
+      });
+    }
+
+    function contentText(content) {
+      if (typeof content === "string") {
+        return content;
+      }
+      return content
+        .filter(isTextPart)
+        .map((part) => part.text)
+        .join("\\n");
+    }
+
+    function contentImages(content) {
+      if (!Array.isArray(content)) {
+        return [];
+      }
+      return content
+        .filter(isImagePart)
+        .map((part) => part.image_url.url);
+    }
+
     function loadHistory() {
       try {
         const saved = JSON.parse(localStorage.getItem(historyStorageKey) || "[]");
@@ -436,7 +588,7 @@ CHAT_HTML = """<!doctype html>
             return (
               message &&
               ["user", "assistant"].includes(message.role) &&
-              typeof message.content === "string" &&
+              isMessageContent(message.content) &&
               (message.meta === undefined || typeof message.meta === "string")
             );
           })
@@ -447,10 +599,14 @@ CHAT_HTML = """<!doctype html>
     }
 
     function saveHistory() {
-      localStorage.setItem(
-        historyStorageKey,
-        JSON.stringify(state.messages.slice(-maxStoredMessages))
-      );
+      try {
+        localStorage.setItem(
+          historyStorageKey,
+          JSON.stringify(state.messages.slice(-maxStoredMessages))
+        );
+      } catch (error) {
+        // Large inline images can exceed browser storage quotas; the live chat still works.
+      }
     }
 
     function setError(message) {
@@ -472,7 +628,14 @@ CHAT_HTML = """<!doctype html>
       if (state.messages.length === 0) {
         const empty = document.createElement("div");
         empty.className = "message";
-        empty.innerHTML = "<div class=\\"message-head\\">Ready</div><div class=\\"message-body\\">Send a message when at least one worker is active.</div>";
+        const head = document.createElement("div");
+        head.className = "message-head";
+        head.textContent = "Ready";
+        const body = document.createElement("div");
+        body.className = "message-body";
+        body.textContent = "Send a message to an active worker or a Groq route.";
+        empty.appendChild(head);
+        empty.appendChild(body);
         els.messages.appendChild(empty);
         return;
       }
@@ -483,13 +646,28 @@ CHAT_HTML = """<!doctype html>
         const head = document.createElement("div");
         head.className = "message-head";
         head.textContent = roleLabel(message.role);
-
-        const body = document.createElement("div");
-        body.className = "message-body";
-        body.textContent = message.content;
-
         item.appendChild(head);
-        item.appendChild(body);
+
+        const text = contentText(message.content);
+        const images = contentImages(message.content);
+        if (text) {
+          const body = document.createElement("div");
+          body.className = "message-body";
+          body.textContent = text;
+          item.appendChild(body);
+        }
+        if (images.length > 0) {
+          const imageGrid = document.createElement("div");
+          imageGrid.className = "message-images";
+          for (const url of images) {
+            const image = document.createElement("img");
+            image.src = url;
+            image.alt = "";
+            image.loading = "lazy";
+            imageGrid.appendChild(image);
+          }
+          item.appendChild(imageGrid);
+        }
         if (message.meta) {
           const meta = document.createElement("div");
           meta.className = "message-meta";
@@ -505,13 +683,22 @@ CHAT_HTML = """<!doctype html>
       return state.messages.map((message) => {
         return {
           role: message.role,
-          content: message.content,
+          content: cloneContent(message.content),
         };
       });
     }
 
-    function answerMeta(payload, durationSeconds) {
-      const completionTokens = Number(payload.usage?.completion_tokens || 0);
+    function estimateTokens(text) {
+      const normalized = (text || "").trim();
+      if (!normalized) {
+        return 0;
+      }
+      const lexical = normalized.match(/\\w+|[^\\w\\s]/gu) || [];
+      return Math.max(1, lexical.length, Math.ceil(normalized.length / 4));
+    }
+
+    function answerMetaFromUsage(usage, answer, durationSeconds) {
+      const completionTokens = Number(usage?.completion_tokens || 0) || estimateTokens(answer);
       const tokensPerSecond = completionTokens > 0
         ? completionTokens / Math.max(durationSeconds, 0.001)
         : 0;
@@ -522,6 +709,150 @@ CHAT_HTML = """<!doctype html>
       return `answered in ${secondsText}s`;
     }
 
+    function renderAttachments() {
+      els.attachments.innerHTML = "";
+      for (const [index, image] of state.pendingImages.entries()) {
+        const item = document.createElement("div");
+        item.className = "attachment";
+
+        const preview = document.createElement("img");
+        preview.src = image.url;
+        preview.alt = "";
+        item.appendChild(preview);
+
+        const name = document.createElement("span");
+        name.textContent = image.name;
+        item.appendChild(name);
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "remove-attachment";
+        remove.textContent = "Remove";
+        remove.addEventListener("click", () => {
+          state.pendingImages.splice(index, 1);
+          renderAttachments();
+        });
+        item.appendChild(remove);
+        els.attachments.appendChild(item);
+      }
+    }
+
+    function fileToDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("failed to read image"));
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function addImageFiles(files) {
+      setError("");
+      for (const file of files) {
+        if (!file.type.startsWith("image/")) {
+          setError(`${file.name} is not an image file`);
+          continue;
+        }
+        if (file.size > maxInlineImageBytes) {
+          setError(`${file.name} is too large for inline upload`);
+          continue;
+        }
+        const url = await fileToDataUrl(file);
+        state.pendingImages.push({ name: file.name, url });
+      }
+      els.imageFiles.value = "";
+      renderAttachments();
+    }
+
+    function buildUserContent(text, imageUrl) {
+      const imageParts = state.pendingImages.map((image) => ({
+        type: "image_url",
+        image_url: { url: image.url },
+      }));
+      if (imageUrl) {
+        imageParts.push({ type: "image_url", image_url: { url: imageUrl } });
+      }
+      if (imageParts.length === 0) {
+        return text;
+      }
+      const parts = [];
+      if (text) {
+        parts.push({ type: "text", text });
+      }
+      return parts.concat(imageParts);
+    }
+
+    function streamErrorMessage(payload, fallbackStatus) {
+      return (
+        payload.detail ||
+        payload.error?.message ||
+        payload.message ||
+        `HTTP ${fallbackStatus}`
+      );
+    }
+
+    async function readStream(response, assistantMessage) {
+      if (!response.body) {
+        const payload = await response.json().catch(() => ({}));
+        assistantMessage.content = payload.choices?.[0]?.message?.content || "";
+        return payload.usage || null;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let usage = null;
+
+      function processEvent(eventText) {
+        const dataLines = eventText
+          .split(/\\r?\\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart());
+
+        for (const data of dataLines) {
+          if (!data) {
+            continue;
+          }
+          if (data === "[DONE]") {
+            return true;
+          }
+          const payload = JSON.parse(data);
+          if (payload.error) {
+            throw new Error(payload.error.message || "stream failed");
+          }
+          if (payload.usage) {
+            usage = payload.usage;
+          }
+          const delta = payload.choices?.[0]?.delta?.content || "";
+          if (delta) {
+            assistantMessage.content += delta;
+            renderMessages();
+          }
+        }
+        return false;
+      }
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split(/\\n\\n/);
+        buffer = events.pop() || "";
+        for (const eventText of events) {
+          if (processEvent(eventText)) {
+            return usage;
+          }
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) {
+        processEvent(buffer);
+      }
+      return usage;
+    }
+
     async function refreshHealth() {
       try {
         const response = await fetch("/health", { cache: "no-store" });
@@ -530,9 +861,12 @@ CHAT_HTML = """<!doctype html>
         }
         const health = await response.json();
         const active = Number(health.active_workers || 0);
-        els.status.className = active > 0 ? "status ok" : "status";
-        els.status.lastElementChild.textContent = `${active} active`;
-        els.workerSummary.textContent = `${active} active worker${active === 1 ? "" : "s"}`;
+        const groqAvailable = Boolean(health.groq_available);
+        els.status.className = active > 0 || groqAvailable ? "status ok" : "status";
+        els.status.lastElementChild.textContent = groqAvailable
+          ? `${active} active · Groq`
+          : `${active} active`;
+        els.workerSummary.textContent = `${active} active worker${active === 1 ? "" : "s"}${groqAvailable ? " · Groq keys ready" : ""}`;
       } catch (error) {
         els.status.className = "status bad";
         els.status.lastElementChild.textContent = "Offline";
@@ -545,16 +879,21 @@ CHAT_HTML = """<!doctype html>
       if (state.busy) {
         return;
       }
-      const content = els.prompt.value.trim();
-      if (!content) {
+      const text = els.prompt.value.trim();
+      const imageUrl = els.imageUrl.value.trim();
+      if (!text && !imageUrl && state.pendingImages.length === 0) {
         return;
       }
 
       setError("");
       saveSettings();
+      const content = buildUserContent(text, imageUrl);
       state.messages.push({ role: "user", content });
       saveHistory();
       els.prompt.value = "";
+      els.imageUrl.value = "";
+      state.pendingImages = [];
+      renderAttachments();
       renderMessages();
       setBusy(true);
 
@@ -575,21 +914,32 @@ CHAT_HTML = """<!doctype html>
             max_tokens: Number(els.maxTokens.value || 512),
             temperature: Number(els.temperature.value || 0.7),
             top_p: Number(els.topP.value || 0.9),
+            stream: true,
           }),
         });
-        const durationSeconds = (performance.now() - startedAt) / 1000;
 
-        const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
-          throw new Error(payload.detail || payload.error?.message || `HTTP ${response.status}`);
+          const payload = await response.json().catch(() => ({}));
+          throw new Error(streamErrorMessage(payload, response.status));
         }
 
-        const answer = payload.choices?.[0]?.message?.content || "";
-        state.messages.push({
+        const assistantMessage = {
           role: "assistant",
-          content: answer || "(empty response)",
-          meta: answerMeta(payload, durationSeconds),
-        });
+          content: "",
+        };
+        state.messages.push(assistantMessage);
+        renderMessages();
+
+        const usage = await readStream(response, assistantMessage);
+        const durationSeconds = (performance.now() - startedAt) / 1000;
+        if (!assistantMessage.content) {
+          assistantMessage.content = "(empty response)";
+        }
+        assistantMessage.meta = answerMetaFromUsage(
+          usage,
+          assistantMessage.content,
+          durationSeconds
+        );
         saveHistory();
         renderMessages();
         await refreshHealth();
@@ -603,9 +953,16 @@ CHAT_HTML = """<!doctype html>
     }
 
     els.form.addEventListener("submit", sendMessage);
+    els.imageFiles.addEventListener("change", () => {
+      addImageFiles(Array.from(els.imageFiles.files || [])).catch((error) => {
+        setError(error.message || String(error));
+      });
+    });
     els.saveSettings.addEventListener("click", saveSettings);
     els.clearChat.addEventListener("click", () => {
       state.messages = [];
+      state.pendingImages = [];
+      renderAttachments();
       saveHistory();
       setError("");
       renderMessages();
@@ -619,6 +976,7 @@ CHAT_HTML = """<!doctype html>
 
     loadSettings();
     loadHistory();
+    renderAttachments();
     renderMessages();
     refreshHealth();
   </script>

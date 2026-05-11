@@ -278,7 +278,7 @@ def main() -> None:
     gateway_ws_url = args.gateway_ws_url or env_values.get("GATEWAY_WS_URL", "")
     served_model = args.served_model or env_values.get("SERVED_MODEL", "qwen2.5-9b-quantized")
     model_id = args.model_id or env_values.get("MODEL_ID", "Qwen/Qwen2.5-7B-Instruct")
-    worker_backend = args.worker_backend or env_values.get("WORKER_BACKEND", "transformers")
+    worker_backend = args.worker_backend or env_values.get("WORKER_BACKEND", "vllm")
     vllm_model_id = args.vllm_model_id or env_values.get("VLLM_MODEL_ID", model_id)
     vllm_served_model = args.vllm_served_model or env_values.get("VLLM_SERVED_MODEL", served_model)
     vllm_quantization = args.vllm_quantization or env_values.get("VLLM_QUANTIZATION", "")

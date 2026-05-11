@@ -121,7 +121,7 @@ def stage_worker(
                 "GATEWAY_WS_URL=wss://your-domain.example/workers/connect",
                 "WORKER_TOKEN=change-me-worker-token",
                 f"SERVED_MODEL={served_model}",
-                "WORKER_BACKEND=transformers",
+                "WORKER_BACKEND=vllm",
                 "MODEL_ID=Qwen/Qwen2.5-7B-Instruct",
                 "LOAD_IN_4BIT=true",
                 "HF_TOKEN=",

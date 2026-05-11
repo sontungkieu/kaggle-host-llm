@@ -8,11 +8,59 @@ import threading
 from fastapi.testclient import TestClient
 
 from kaggle_host_llm.app import create_app
+from kaggle_host_llm.groq_client import GroqKeyPool, load_groq_keys
+from kaggle_host_llm.openai_models import (
+    ChatCompletionChoice,
+    ChatCompletionResponse,
+    ChatCompletionUsage,
+    ChatMessage,
+)
 from kaggle_host_llm.registry import WorkerRegistry
 from kaggle_host_llm.settings import Settings
 
 
 MODEL = "qwen2.5-9b-quantized"
+GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+
+
+class FakeGroqClient:
+    def __init__(self) -> None:
+        self.routes = []
+
+    def has_keys(self) -> bool:
+        return True
+
+    async def complete(self, route):
+        self.routes.append(route)
+        return ChatCompletionResponse(
+            id="chatcmpl-groq-test",
+            created=1,
+            model=route.model,
+            choices=[
+                ChatCompletionChoice(
+                    message=ChatMessage(role="assistant", content="groq answer")
+                )
+            ],
+            usage=ChatCompletionUsage(
+                prompt_tokens=3,
+                completion_tokens=2,
+                total_tokens=5,
+            ),
+        )
+
+    async def stream(self, route):
+        self.routes.append(route)
+        yield (
+            'data: {"id":"chatcmpl-groq-test","object":"chat.completion.chunk",'
+            '"created":1,"model":"groq-test","choices":[{"index":0,'
+            '"delta":{"content":"groq "},"finish_reason":null}]}\n\n'
+        )
+        yield (
+            'data: {"id":"chatcmpl-groq-test","object":"chat.completion.chunk",'
+            '"created":1,"model":"groq-test","choices":[{"index":0,'
+            '"delta":{"content":"stream"},"finish_reason":null}]}\n\n'
+        )
+        yield "data: [DONE]\n\n"
 
 
 def make_client(tmp_path, **overrides):
@@ -108,6 +156,140 @@ def test_streaming_dispatcher_returns_503_without_worker(tmp_path):
     assert "no healthy worker" in response.json()["detail"]
 
 
+def test_groq_key_file_loads_multiple_formats_and_round_robins(tmp_path):
+    key_file = tmp_path / "groq_key.env"
+    key_file.write_text(
+        "\n".join(
+            [
+                "GROQ_API_KEYS=key-a,key-b",
+                "GROQ_API_KEY_3=key-c",
+                "personal=key-labeled",
+                "key-d",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_groq_keys(key_file) == [
+        "key-a",
+        "key-b",
+        "key-c",
+        "key-labeled",
+        "key-d",
+    ]
+
+    async def collect_keys():
+        pool = GroqKeyPool(key_file)
+        return [await pool.next_key() for _ in range(5)]
+
+    assert asyncio.run(collect_keys()) == [
+        "key-a",
+        "key-b",
+        "key-c",
+        "key-labeled",
+        "key-d",
+    ]
+
+
+def test_groq_prefix_routes_without_worker_and_strips_prefix(tmp_path):
+    with make_client(tmp_path) as client:
+        fake_groq = FakeGroqClient()
+        client.app.state.dispatcher.groq_client = fake_groq
+        response = client.post(
+            "/v1/chat/completions",
+            json=chat_payload(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"groq:{GROQ_MODEL} describe this",
+                    }
+                ]
+            ),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == GROQ_MODEL
+    assert response.json()["choices"][0]["message"]["content"] == "groq answer"
+    assert len(fake_groq.routes) == 1
+    assert fake_groq.routes[0].model == GROQ_MODEL
+    assert fake_groq.routes[0].request.messages[-1].content == "describe this"
+
+
+def test_groq_vision_content_parts_route_to_groq(tmp_path):
+    with make_client(tmp_path) as client:
+        fake_groq = FakeGroqClient()
+        client.app.state.dispatcher.groq_client = fake_groq
+        response = client.post(
+            "/v1/chat/completions",
+            json=chat_payload(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"groq:{GROQ_MODEL} what is in this image?",
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,iVBORw0KGgo="
+                                },
+                            },
+                        ],
+                    }
+                ]
+            ),
+        )
+
+    assert response.status_code == 200
+    content = fake_groq.routes[0].request.messages[-1].model_dump(mode="json")["content"]
+    assert content[0]["text"] == "what is in this image?"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_image_input_without_groq_prefix_returns_400(tmp_path):
+    with make_client(tmp_path) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json=chat_payload(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "what is in this image?"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "https://example.com/image.png"},
+                            },
+                        ],
+                    }
+                ]
+            ),
+        )
+
+    assert response.status_code == 400
+    assert "Groq vision route" in response.json()["detail"]
+
+
+def test_groq_streaming_route_emits_proxied_chunks(tmp_path):
+    with make_client(tmp_path) as client:
+        fake_groq = FakeGroqClient()
+        client.app.state.dispatcher.groq_client = fake_groq
+        response = client.post(
+            "/v1/chat/completions",
+            json=chat_payload(
+                stream=True,
+                messages=[{"role": "user", "content": f"groq:{GROQ_MODEL} hello"}],
+            ),
+        )
+
+    assert response.status_code == 200
+    assert "groq " in response.text
+    assert "stream" in response.text
+    assert "[DONE]" in response.text
+
+
 def test_chat_page_returns_basic_ui(tmp_path):
     with make_client(tmp_path, api_key="api-key") as client:
         response = client.get("/chat")
@@ -117,6 +299,7 @@ def test_chat_page_returns_basic_ui(tmp_path):
     assert "Kaggle Host LLM" in response.text
     assert "/v1/chat/completions" in response.text
     assert "tok/s" in response.text
+    assert "Image URL" in response.text
 
 
 def test_non_streaming_completion_routes_to_worker(tmp_path):

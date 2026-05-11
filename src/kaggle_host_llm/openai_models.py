@@ -7,9 +7,27 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
+class ChatTextContentPart(BaseModel):
+    type: Literal["text"]
+    text: str
+
+
+class ChatImageUrl(BaseModel):
+    url: str = Field(min_length=1)
+
+
+class ChatImageContentPart(BaseModel):
+    type: Literal["image_url"]
+    image_url: ChatImageUrl
+
+
+ChatContentPart = ChatTextContentPart | ChatImageContentPart
+ChatContent = str | list[ChatContentPart]
+
+
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant", "tool"]
-    content: str
+    content: ChatContent
 
 
 class ChatCompletionRequest(BaseModel):
@@ -60,6 +78,22 @@ def estimate_text_tokens(text: str) -> int:
     return max(1, lexical_count, char_count)
 
 
+def message_text(content: ChatContent) -> str:
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, ChatTextContentPart):
+            parts.append(part.text)
+    return "\n".join(parts)
+
+
+def message_has_image(content: ChatContent) -> bool:
+    return not isinstance(content, str) and any(
+        isinstance(part, ChatImageContentPart) for part in content
+    )
+
+
 def estimate_usage(
     *,
     messages: list[ChatMessage],
@@ -69,7 +103,7 @@ def estimate_usage(
     for message in messages:
         prompt_tokens += 4
         prompt_tokens += estimate_text_tokens(message.role)
-        prompt_tokens += estimate_text_tokens(message.content)
+        prompt_tokens += estimate_text_tokens(message_text(message.content))
 
     completion_tokens = estimate_text_tokens(completion)
     return ChatCompletionUsage(
