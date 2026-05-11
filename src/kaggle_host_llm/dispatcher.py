@@ -13,6 +13,7 @@ from .openai_models import (
     ChatCompletionChoice,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionUsage,
     ChatMessage,
     chunk_payload,
     estimate_usage,
@@ -31,6 +32,7 @@ class Dispatcher:
         job_id, worker, pending = await self._send_job(request)
         content_parts: list[str] = []
         finish_reason = "stop"
+        worker_usage: ChatCompletionUsage | None = None
         try:
             while True:
                 message = await asyncio.wait_for(
@@ -44,6 +46,7 @@ class Dispatcher:
                     if final_content is not None:
                         content_parts = [str(final_content)]
                     finish_reason = str(message.get("finish_reason") or "stop")
+                    worker_usage = parse_worker_usage(message)
                     break
                 elif message_type == "job_error":
                     raise HTTPException(
@@ -60,7 +63,10 @@ class Dispatcher:
             await self.registry.release_job(worker.node_id, job_id)
 
         message = ChatMessage(role="assistant", content="".join(content_parts))
-        usage = estimate_usage(messages=request.messages, completion=message.content)
+        usage = worker_usage or estimate_usage(
+            messages=request.messages,
+            completion=message.content,
+        )
         return ChatCompletionResponse(
             id=completion_id,
             created=created,
@@ -170,3 +176,26 @@ class Dispatcher:
                 detail="failed to send job to worker",
             ) from exc
         return job_id, worker, pending
+
+
+def parse_worker_usage(message: dict[str, Any]) -> ChatCompletionUsage | None:
+    raw_usage = message.get("usage")
+    if not isinstance(raw_usage, dict):
+        raw_usage = message
+
+    try:
+        prompt_tokens = int(raw_usage.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(raw_usage.get("completion_tokens", 0) or 0)
+        total_tokens = int(raw_usage.get("total_tokens", 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+    if prompt_tokens <= 0 and completion_tokens <= 0 and total_tokens <= 0:
+        return None
+    if total_tokens <= 0:
+        total_tokens = prompt_tokens + completion_tokens
+    return ChatCompletionUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )

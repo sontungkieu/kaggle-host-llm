@@ -116,6 +116,7 @@ def test_chat_page_returns_basic_ui(tmp_path):
     assert "text/html" in response.headers["content-type"]
     assert "Kaggle Host LLM" in response.text
     assert "/v1/chat/completions" in response.text
+    assert "tok/s" in response.text
 
 
 def test_non_streaming_completion_routes_to_worker(tmp_path):
@@ -145,6 +146,41 @@ def test_non_streaming_completion_routes_to_worker(tmp_path):
     assert body["usage"]["total_tokens"] == (
         body["usage"]["prompt_tokens"] + body["usage"]["completion_tokens"]
     )
+
+
+def test_non_streaming_completion_uses_worker_token_usage(tmp_path):
+    with make_client(tmp_path) as client:
+        websocket_ctx, ws = register_worker(client)
+        result = {}
+
+        def call_gateway():
+            result["response"] = client.post("/v1/chat/completions", json=chat_payload())
+
+        thread = threading.Thread(target=call_gateway)
+        thread.start()
+        job = ws.receive_json()
+        ws.send_json(
+            {
+                "type": "job_done",
+                "job_id": job["job_id"],
+                "content": "hi there",
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 3,
+                    "total_tokens": 10,
+                },
+            }
+        )
+        thread.join(timeout=5)
+        websocket_ctx.__exit__(None, None, None)
+
+    assert not thread.is_alive()
+    body = result["response"].json()
+    assert body["usage"] == {
+        "prompt_tokens": 7,
+        "completion_tokens": 3,
+        "total_tokens": 10,
+    }
 
 
 def test_worker_reconnect_does_not_let_old_socket_unregister_new_socket(tmp_path):

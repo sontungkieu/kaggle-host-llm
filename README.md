@@ -35,12 +35,20 @@ GATEWAY_PUBLIC_URL=https://your-domain.example
 GATEWAY_WS_URL=wss://your-domain.example/workers/connect
 GATEWAY_HEALTH_URL=https://your-domain.example/health
 SERVED_MODEL=qwen2.5-9b-quantized
+WORKER_BACKEND=transformers
 MODEL_ID=Qwen/Qwen2.5-7B-Instruct
 LOAD_IN_4BIT=true
 HF_TOKEN=
 MAX_WORKER_JOBS=auto
 KEEPALIVE_LOG_SECONDS=60
 KAGGLE_ACCELERATOR=NvidiaTeslaT4
+VLLM_MODEL_ID=Qwen/Qwen2.5-7B-Instruct-AWQ
+VLLM_SERVED_MODEL=qwen2.5-9b-quantized
+VLLM_QUANTIZATION=awq
+VLLM_TENSOR_PARALLEL_SIZE=auto
+VLLM_MAX_MODEL_LEN=4096
+VLLM_GPU_MEMORY_UTILIZATION=0.88
+VLLM_DTYPE=auto
 ```
 
 The app automatically loads `.secrets/.env` and `.env` when present. Keep real secrets in `.secrets/.env`; the `.secrets/` folder is ignored by git.
@@ -114,6 +122,7 @@ https://hostllm.ccat.io.vn/chat
 If `GATEWAY_API_KEY` is configured, paste that value into the Gateway API key field in the chat sidebar. The browser stores this setting in local storage only.
 
 The chat UI keeps conversation context in browser local storage and sends the full visible message history with each `/v1/chat/completions` request. Use **Clear** to start a fresh conversation.
+Assistant replies include a small local timing line with response seconds and approximate completion `tok/s` based on the gateway `usage.completion_tokens` value.
 
 Live worker file and root control:
 
@@ -153,7 +162,7 @@ Quick pipeline test:
 uv run python scripts/test_chat_pipeline.py --question "Say OK only."
 ```
 
-`usage.prompt_tokens`, `usage.completion_tokens`, and `usage.total_tokens` are gateway-side estimates. They are useful for rough monitoring, but they are not exact tokenizer counts from the Kaggle worker.
+`usage.prompt_tokens`, `usage.completion_tokens`, and `usage.total_tokens` use worker-provided counts when available, for example from vLLM. Otherwise the gateway returns rough estimates.
 
 Streaming uses standard server-sent events:
 
@@ -169,15 +178,24 @@ The notebook template is [notebooks/kaggle_qwen_worker.ipynb](notebooks/kaggle_q
 GATEWAY_WS_URL=wss://your-domain.example/workers/connect
 WORKER_TOKEN=<WORKER_SHARED_TOKEN>
 SERVED_MODEL=qwen2.5-9b-quantized
+WORKER_BACKEND=transformers
 MODEL_ID=Qwen/Qwen2.5-7B-Instruct
 LOAD_IN_4BIT=true
 HF_TOKEN=
 MAX_WORKER_JOBS=auto
 KEEPALIVE_LOG_SECONDS=60
 KAGGLE_ACCELERATOR=NvidiaTeslaT4
+VLLM_MODEL_ID=Qwen/Qwen2.5-7B-Instruct-AWQ
+VLLM_SERVED_MODEL=qwen2.5-9b-quantized
+VLLM_QUANTIZATION=awq
+VLLM_TENSOR_PARALLEL_SIZE=auto
+VLLM_MAX_MODEL_LEN=4096
+VLLM_GPU_MEMORY_UTILIZATION=0.88
 ```
 
-`SERVED_MODEL` is the name clients request through `/v1/chat/completions`. `MODEL_ID` is the actual Hugging Face or Kaggle-accessible model path loaded by `transformers`. By default the worker loads Qwen2.5 Instruct and applies 4-bit `bitsandbytes` quantization; AWQ checkpoints may require extra packages such as `gptqmodel`. `HF_TOKEN` is optional but helps with Hugging Face rate limits. `MAX_WORKER_JOBS=auto` advertises one concurrent slot per detected GPU, so a T4x2 notebook registers capacity 2. The last notebook cell runs forever with a WebSocket reconnect loop and periodic keepalive logs so the Kaggle run remains active.
+`SERVED_MODEL` is the name clients request through `/v1/chat/completions`. `WORKER_BACKEND=transformers` keeps the original local `transformers.generate()` path with optional 4-bit `bitsandbytes`. `WORKER_BACKEND=vllm` starts a local vLLM OpenAI-compatible server inside the notebook and forwards gateway jobs to `http://127.0.0.1:8001/v1/chat/completions`; this keeps vLLM private inside Kaggle and preserves the outbound WebSocket architecture. For vLLM on T4x2, prefer AWQ/GPTQ checkpoints and keep `VLLM_MAX_MODEL_LEN` conservative, for example `4096`, to avoid OOM.
+
+`MODEL_ID` is the model used by the transformers backend. `VLLM_MODEL_ID` is the model used by the vLLM backend. `HF_TOKEN` is optional but helps with Hugging Face rate limits. `MAX_WORKER_JOBS=auto` registers capacity 1 for the transformers backend and one concurrent slot per detected GPU for vLLM, so a T4x2 vLLM notebook registers capacity 2. The worker loop accepts multiple jobs concurrently up to that capacity and streams responses back over the single WebSocket.
 The wrapper pushes with `--accelerator NvidiaTeslaT4` by default. P100 can fail with current Kaggle PyTorch images because that build does not support CUDA `sm_60`.
 
 Create a git-ignored staging folder for Kaggle:
@@ -190,6 +208,18 @@ For one-command staging + push with credentials selected from `.secrets/all-kagg
 
 ```bash
 uv run python scripts/push_kaggle_worker.py <kaggle-username>
+```
+
+To push a vLLM worker using Qwen2.5 7B AWQ on T4x2:
+
+```bash
+uv run python scripts/push_kaggle_worker.py <kaggle-username> \
+  --worker-backend vllm \
+  --model-id Qwen/Qwen2.5-7B-Instruct \
+  --vllm-model-id Qwen/Qwen2.5-7B-Instruct-AWQ \
+  --vllm-quantization awq \
+  --vllm-max-model-len 4096 \
+  --wait-active
 ```
 
 The wrapper creates a temporary `KAGGLE_CONFIG_DIR`, writes that account's `kaggle.json` outside the repo, runs `kaggle kernels push`, checks `kaggle kernels status`, and removes the temporary credential directory when done. The Kaggle notebook itself contains a long-running reconnect loop; the local wrapper does not need to stay attached for the notebook to keep running.

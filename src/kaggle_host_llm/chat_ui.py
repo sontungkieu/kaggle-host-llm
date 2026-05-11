@@ -241,6 +241,13 @@ CHAT_HTML = """<!doctype html>
       line-height: 1.55;
     }
 
+    .message-meta {
+      padding: 0 12px 11px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
     .composer {
       border-top: 1px solid var(--border);
       background: var(--surface);
@@ -429,7 +436,8 @@ CHAT_HTML = """<!doctype html>
             return (
               message &&
               ["user", "assistant"].includes(message.role) &&
-              typeof message.content === "string"
+              typeof message.content === "string" &&
+              (message.meta === undefined || typeof message.meta === "string")
             );
           })
           .slice(-maxStoredMessages);
@@ -482,9 +490,36 @@ CHAT_HTML = """<!doctype html>
 
         item.appendChild(head);
         item.appendChild(body);
+        if (message.meta) {
+          const meta = document.createElement("div");
+          meta.className = "message-meta";
+          meta.textContent = message.meta;
+          item.appendChild(meta);
+        }
         els.messages.appendChild(item);
       }
       els.messages.scrollTop = els.messages.scrollHeight;
+    }
+
+    function requestMessages() {
+      return state.messages.map((message) => {
+        return {
+          role: message.role,
+          content: message.content,
+        };
+      });
+    }
+
+    function answerMeta(payload, durationSeconds) {
+      const completionTokens = Number(payload.usage?.completion_tokens || 0);
+      const tokensPerSecond = completionTokens > 0
+        ? completionTokens / Math.max(durationSeconds, 0.001)
+        : 0;
+      const secondsText = durationSeconds.toFixed(durationSeconds >= 10 ? 1 : 2);
+      if (completionTokens > 0) {
+        return `answered in ${secondsText}s · ${completionTokens} tokens · ${tokensPerSecond.toFixed(1)} tok/s`;
+      }
+      return `answered in ${secondsText}s`;
     }
 
     async function refreshHealth() {
@@ -530,17 +565,19 @@ CHAT_HTML = """<!doctype html>
           headers.Authorization = `Bearer ${apiKey}`;
         }
 
+        const startedAt = performance.now();
         const response = await fetch("/v1/chat/completions", {
           method: "POST",
           headers,
           body: JSON.stringify({
             model: els.model.value.trim() || "qwen2.5-9b-quantized",
-            messages: state.messages,
+            messages: requestMessages(),
             max_tokens: Number(els.maxTokens.value || 512),
             temperature: Number(els.temperature.value || 0.7),
             top_p: Number(els.topP.value || 0.9),
           }),
         });
+        const durationSeconds = (performance.now() - startedAt) / 1000;
 
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
@@ -548,7 +585,11 @@ CHAT_HTML = """<!doctype html>
         }
 
         const answer = payload.choices?.[0]?.message?.content || "";
-        state.messages.push({ role: "assistant", content: answer || "(empty response)" });
+        state.messages.push({
+          role: "assistant",
+          content: answer || "(empty response)",
+          meta: answerMeta(payload, durationSeconds),
+        });
         saveHistory();
         renderMessages();
         await refreshHealth();

@@ -171,6 +171,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Actual model id loaded inside the notebook. Defaults to MODEL_ID from env file.",
     )
     parser.add_argument(
+        "--worker-backend",
+        choices=["transformers", "vllm"],
+        default="",
+        help="Notebook inference backend. Defaults to WORKER_BACKEND from env file.",
+    )
+    parser.add_argument(
+        "--vllm-model-id",
+        default="",
+        help="Model id for vLLM. Defaults to VLLM_MODEL_ID or --model-id.",
+    )
+    parser.add_argument(
+        "--vllm-served-model",
+        default="",
+        help="Model name sent to local vLLM. Defaults to VLLM_SERVED_MODEL or --served-model.",
+    )
+    parser.add_argument(
+        "--vllm-quantization",
+        default="",
+        help="vLLM quantization argument, for example awq or gptq.",
+    )
+    parser.add_argument(
+        "--vllm-tensor-parallel-size",
+        default="",
+        help="vLLM tensor parallel size. Defaults to VLLM_TENSOR_PARALLEL_SIZE or auto.",
+    )
+    parser.add_argument(
+        "--vllm-max-model-len",
+        default="",
+        help="vLLM max model length. Defaults to VLLM_MAX_MODEL_LEN or 4096.",
+    )
+    parser.add_argument(
+        "--vllm-gpu-memory-utilization",
+        default="",
+        help="vLLM GPU memory utilization. Defaults to VLLM_GPU_MEMORY_UTILIZATION or 0.88.",
+    )
+    parser.add_argument(
+        "--vllm-dtype",
+        default="",
+        help="vLLM dtype. Defaults to VLLM_DTYPE or auto.",
+    )
+    parser.add_argument(
+        "--vllm-extra-args",
+        default="",
+        help="Extra args appended to the vLLM server command.",
+    )
+    parser.add_argument(
+        "--vllm-trust-remote-code",
+        action="store_true",
+        help="Pass --trust-remote-code to vLLM.",
+    )
+    parser.add_argument(
         "--accelerator",
         default="",
         help="Kaggle accelerator for this run. Defaults to KAGGLE_ACCELERATOR or NvidiaTeslaT4.",
@@ -227,6 +278,26 @@ def main() -> None:
     gateway_ws_url = args.gateway_ws_url or env_values.get("GATEWAY_WS_URL", "")
     served_model = args.served_model or env_values.get("SERVED_MODEL", "qwen2.5-9b-quantized")
     model_id = args.model_id or env_values.get("MODEL_ID", "Qwen/Qwen2.5-7B-Instruct")
+    worker_backend = args.worker_backend or env_values.get("WORKER_BACKEND", "transformers")
+    vllm_model_id = args.vllm_model_id or env_values.get("VLLM_MODEL_ID", model_id)
+    vllm_served_model = args.vllm_served_model or env_values.get("VLLM_SERVED_MODEL", served_model)
+    vllm_quantization = args.vllm_quantization or env_values.get("VLLM_QUANTIZATION", "")
+    vllm_tensor_parallel_size = (
+        args.vllm_tensor_parallel_size
+        or env_values.get("VLLM_TENSOR_PARALLEL_SIZE", "auto")
+    )
+    vllm_max_model_len = args.vllm_max_model_len or env_values.get("VLLM_MAX_MODEL_LEN", "4096")
+    vllm_gpu_memory_utilization = (
+        args.vllm_gpu_memory_utilization
+        or env_values.get("VLLM_GPU_MEMORY_UTILIZATION", "0.88")
+    )
+    vllm_dtype = args.vllm_dtype or env_values.get("VLLM_DTYPE", "auto")
+    vllm_extra_args = args.vllm_extra_args or env_values.get("VLLM_EXTRA_ARGS", "")
+    vllm_trust_remote_code = (
+        "true"
+        if args.vllm_trust_remote_code
+        else env_values.get("VLLM_TRUST_REMOTE_CODE", "false")
+    )
     accelerator = args.accelerator or env_values.get("KAGGLE_ACCELERATOR", "NvidiaTeslaT4")
     worker_token = env_values.get("WORKER_SHARED_TOKEN", "")
 
@@ -238,11 +309,25 @@ def main() -> None:
             "OWNER": args.owner,
             "SERVED_MODEL": served_model,
             "MODEL_ID": model_id,
+            "WORKER_BACKEND": worker_backend,
             "LOAD_IN_4BIT": env_values.get("LOAD_IN_4BIT", "true"),
             "HF_TOKEN": env_values.get("HF_TOKEN", ""),
             "MAX_WORKER_JOBS": env_values.get("MAX_WORKER_JOBS", "auto"),
             "KEEPALIVE_LOG_SECONDS": int(env_values.get("KEEPALIVE_LOG_SECONDS", "60")),
             "KAGGLE_ACCELERATOR": accelerator,
+            "VLLM_MODEL_ID": vllm_model_id,
+            "VLLM_SERVED_MODEL": vllm_served_model,
+            "VLLM_QUANTIZATION": vllm_quantization,
+            "VLLM_TENSOR_PARALLEL_SIZE": vllm_tensor_parallel_size,
+            "VLLM_MAX_MODEL_LEN": vllm_max_model_len,
+            "VLLM_GPU_MEMORY_UTILIZATION": vllm_gpu_memory_utilization,
+            "VLLM_DTYPE": vllm_dtype,
+            "VLLM_TRUST_REMOTE_CODE": vllm_trust_remote_code,
+            "VLLM_EXTRA_ARGS": vllm_extra_args,
+            "VLLM_STARTUP_TIMEOUT_SECONDS": env_values.get(
+                "VLLM_STARTUP_TIMEOUT_SECONDS",
+                "900",
+            ),
         }
 
     staging_dir, kernel_id = stage_worker(
