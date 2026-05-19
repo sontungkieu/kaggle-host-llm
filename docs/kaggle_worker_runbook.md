@@ -131,6 +131,7 @@ PaddleOCR lessons:
 - Use Paddle CUDA APIs for GPU detection after torch is removed from that notebook path.
 - `PADDLEOCR_DEVICE=auto` maps T4x2 to `gpu:0,1`.
 - Kaggle notebooks already run inside an event loop, so the final worker cell should use `await worker_loop()`, not `asyncio.run(worker_loop())`.
+- `pipeline.concatenate_markdown_pages(...)` may return a dict such as `{"markdown_texts": ...}` instead of a plain string. Normalize this before sending the result, otherwise API clients see a Python dict-string instead of clean HTML/Markdown text.
 
 ## Push LLM Worker
 
@@ -181,6 +182,39 @@ uv run python scripts/test_ocr_pipeline.py \
   --image-file /tmp/kaggle_host_ocr_test.png \
   --timeout 900
 ```
+
+Public hostname test:
+
+```bash
+uv run python scripts/test_ocr_pipeline.py \
+  --base-url https://hostllm.ccat.io.vn \
+  --model deepseek-ocr2 \
+  --image-file /tmp/kaggle_host_ocr_test.png \
+  --timeout 900
+```
+
+Use `--return-format text` or `--return-format markdown` for public tests. The
+gateway compacts those responses and omits raw OCR geometry/scores; use
+`--return-format all` only when debugging backend internals.
+
+Observed bill-image timings through `https://hostllm.ccat.io.vn` on T4x2:
+
+- PaddleOCR PP-StructureV3: worker inference around `1.6s`; total public request around `6.8s` for an 862 KB PNG sent as base64.
+- DeepSeek OCR2: worker inference around `24s`; total public request around `33.5s` for the same image.
+
+The difference between worker inference time and total request time is mostly
+upload/base64 overhead, gateway dispatch, WebSocket transit, and Cloudflare
+round-trip time. For production clients, prefer `image_url` for already-hosted
+images, resize/compress large PNGs before base64 upload, and use compact
+`return_format` values.
+
+Speed options:
+
+- PaddleOCR: keep using `gpu:0,1`; for receipt-only OCR, consider a lighter text-only PaddleOCR worker that skips PP-StructureV3 layout/table/formula parsing.
+- PaddleOCR: if structured table parsing is unnecessary, disable heavy modules in a future notebook variant and return line-level OCR text.
+- DeepSeek OCR2: reduce `DEEPSEEK_OCR_IMAGE_SIZE` from `768` to `640` or `512` for faster inference, accepting some accuracy loss.
+- DeepSeek OCR2: try `DEEPSEEK_OCR_CROP_MODE=false` for single clean receipt images to avoid crop overhead; keep it enabled for dense documents.
+- DeepSeek OCR2: keep `float16` on T4; `float32` avoids some dtype issues but is too memory-heavy.
 
 Known good DeepSeek sample output:
 
@@ -301,6 +335,7 @@ Common `kaggle.log` error types:
 - If router WAN IP differs from the public IP, the network is behind double NAT/CGNAT and direct public IP exposure will not work.
 - A named Cloudflare Tunnel avoids router forwarding and CGNAT issues.
 - Cloudflare Access/security settings can cause `403` on `/health` for local wait loops. Use local health URL for wrapper wait, while keeping public `GATEWAY_WS_URL` for notebooks.
+- Cloudflare Browser Integrity Check/Bot protections can return `403` with `error code: 1010` for bare Python API clients. Send a normal `User-Agent` header from scripts, or add a WAF skip rule for `hostllm.ccat.io.vn` and API paths such as `/v1/*`.
 
 ## Current Good State Checklist
 

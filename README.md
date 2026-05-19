@@ -274,6 +274,10 @@ Supported inputs are exactly one of `image_url`, `image_base64`, `document_url`,
 }
 ```
 
+Use `return_format=text` or `return_format=markdown` for compact API responses.
+Use `return_format=all` only when you need raw OCR geometry, recognition scores,
+and backend-specific JSON because those payloads can be large over Cloudflare.
+
 Initial worker models:
 
 - `paddleocr-ppstructurev3`: PaddleOCR PP-StructureV3 document parsing; returns Markdown plus page JSON when available.
@@ -286,6 +290,22 @@ uv run python scripts/test_ocr_pipeline.py \
   --model paddleocr-ppstructurev3 \
   --image-file ./document.png
 ```
+
+When testing through Cloudflare, point the client at the public hostname:
+
+```bash
+uv run python scripts/test_ocr_pipeline.py \
+  --base-url https://hostllm.ccat.io.vn \
+  --model deepseek-ocr2 \
+  --image-file ./document.png \
+  --timeout 900
+```
+
+The test clients send a `User-Agent` header because Cloudflare Browser Integrity
+Check/Bot protections can return `403` with `error code: 1010` for bare Python
+HTTP clients. If other API clients hit `1010`, add a normal `User-Agent` header
+or create a Cloudflare WAF skip rule for `hostllm.ccat.io.vn` paths such as
+`/v1/*`.
 
 ## Kaggle Worker
 
@@ -431,6 +451,11 @@ uv run python scripts/push_kaggle_ocr_worker.py <kaggle-username> \
 The OCR notebooks are [notebooks/kaggle_paddleocr_worker.ipynb](notebooks/kaggle_paddleocr_worker.ipynb) and [notebooks/kaggle_deepseek_ocr2_worker.ipynb](notebooks/kaggle_deepseek_ocr2_worker.ipynb). Both register via `/workers/connect` and listen for `ocr_job` envelopes. Use `OCR_MODEL` to override the registered model name, `OCR_CAPACITY` for concurrency, and `KAGGLE_ACCELERATOR=NvidiaTeslaT4` for T4-backed Kaggle sessions.
 
 For PaddleOCR, `PADDLEOCR_DEVICE=auto` maps T4x2 to `gpu:0,1`; set it explicitly if Paddle reports device issues. For DeepSeek-OCR-2 on T4, the template defaults to `DEEPSEEK_OCR_DTYPE=float16` and applies a small dtype-safe scatter patch because the model's remote inference path can produce mixed float32/float16 image embeddings.
+
+The PaddleOCR worker normalizes `PPStructureV3.concatenate_markdown_pages(...)`
+output because Paddle may return a dict containing `markdown_texts` rather than
+a plain string. Re-push the PaddleOCR notebook after updating the template to
+get cleaner `text`/`markdown` output on Kaggle.
 
 If Kaggle reports `Maximum batch GPU session count of 2 reached`, that account already has two GPU sessions. Keep the current workers if they are healthy, push from another account, or delete old kernels first:
 

@@ -9,6 +9,9 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
+USER_AGENT = "kaggle-host-llm-test-client/1.0"
+
+
 def load_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if path.exists():
@@ -59,7 +62,11 @@ def payload_from_args(args: argparse.Namespace) -> dict[str, object]:
 def main() -> None:
     args = build_parser().parse_args()
     env = load_env(Path(args.env_file))
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
     api_key = env.get("GATEWAY_API_KEY", "")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

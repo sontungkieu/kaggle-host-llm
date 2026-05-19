@@ -246,6 +246,8 @@ def test_ocr_routes_to_worker_and_returns_markdown(tmp_path):
     assert body["text"] == "hello"
     assert body["markdown"] == "# hello"
     assert body["pages"][0]["index"] == 0
+    assert body["pages"][0] == {"index": 0, "markdown": "# hello"}
+    assert body["data"] == {}
     assert body["metadata"]["backend"] == "fake"
 
 

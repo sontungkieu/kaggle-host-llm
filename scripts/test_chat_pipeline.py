@@ -7,6 +7,9 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
+USER_AGENT = "kaggle-host-llm-test-client/1.0"
+
+
 def load_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if path.exists():
@@ -67,7 +70,11 @@ def main() -> None:
         "temperature": 0,
         "max_tokens": args.max_tokens,
     }
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = Request(
@@ -88,4 +95,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

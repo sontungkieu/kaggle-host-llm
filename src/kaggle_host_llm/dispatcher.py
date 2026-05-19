@@ -220,22 +220,7 @@ class Dispatcher:
                             "text": str(message.get("content") or ""),
                             "markdown": str(message.get("content") or ""),
                         }
-                    return OcrResponse(
-                        model=request.model,
-                        text=str(result.get("text") or ""),
-                        markdown=str(result.get("markdown") or ""),
-                        data=result.get("data") if isinstance(result.get("data"), dict) else {},
-                        pages=(
-                            result.get("pages")
-                            if isinstance(result.get("pages"), list)
-                            else []
-                        ),
-                        metadata=(
-                            result.get("metadata")
-                            if isinstance(result.get("metadata"), dict)
-                            else {}
-                        ),
-                    )
+                    return self._format_ocr_response(request, result)
                 if message_type in {"ocr_error", "job_error"}:
                     log_kaggle_event(
                         "ocr_worker_job_error",
@@ -367,6 +352,53 @@ class Dispatcher:
                 detail="failed to send OCR job to worker",
             ) from exc
         return job_id, worker, pending
+
+    @staticmethod
+    def _format_ocr_response(request: OcrRequest, result: dict[str, Any]) -> OcrResponse:
+        text = str(result.get("text") or "")
+        markdown = str(result.get("markdown") or "")
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        raw_pages = result.get("pages") if isinstance(result.get("pages"), list) else []
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+
+        pages = [
+            {
+                "index": page.get("index"),
+                "markdown": page.get("markdown", ""),
+            }
+            for page in raw_pages
+            if isinstance(page, dict)
+        ]
+
+        if request.return_format == "text":
+            return OcrResponse(
+                model=request.model,
+                text=text,
+                metadata=metadata,
+            )
+        if request.return_format == "markdown":
+            return OcrResponse(
+                model=request.model,
+                text=text,
+                markdown=markdown,
+                pages=pages,
+                metadata=metadata,
+            )
+        if request.return_format == "json":
+            return OcrResponse(
+                model=request.model,
+                data=data,
+                pages=pages,
+                metadata=metadata,
+            )
+        return OcrResponse(
+            model=request.model,
+            text=text,
+            markdown=markdown,
+            data=data,
+            pages=raw_pages,
+            metadata=metadata,
+        )
 
     @staticmethod
     def _ensure_worker_compatible(request: ChatCompletionRequest) -> None:
