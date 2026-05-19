@@ -6,7 +6,7 @@ The gateway runs on an always-on host and is exposed through Cloudflare Tunnel. 
 
 This project is intentionally best-effort. Kaggle notebooks have session, accelerator, quota, and policy limits, so this is not a 24/24 production cluster design and it must not be used to bypass account/resource restrictions.
 
-Operational notes, troubleshooting history, and current known-good commands are collected in [docs/kaggle_worker_runbook.md](docs/kaggle_worker_runbook.md).
+Operational notes, troubleshooting history, and current known-good commands are collected in [docs/kaggle_worker_runbook.md](docs/kaggle_worker_runbook.md). For the full sequence from root setup, Kaggle worker push, and calling the API from another machine, see [docs/setup_to_external_client.md](docs/setup_to_external_client.md).
 
 ## Install
 
