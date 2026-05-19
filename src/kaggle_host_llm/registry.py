@@ -10,6 +10,8 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from .kaggle_log import log_kaggle_event
+
 
 @dataclass
 class PendingJob:
@@ -113,6 +115,20 @@ class WorkerRegistry:
             previous = self._connections.get(node_id)
             if previous is not None:
                 await self._fail_pending_locked(previous, "worker reconnected")
+                log_kaggle_event(
+                    "worker_reconnected",
+                    level="warning",
+                    owner=previous.owner,
+                    backend=previous.model,
+                    node_id=previous.node_id,
+                    accelerator=previous.accelerator,
+                    served_model=previous.model,
+                    message="worker reconnected",
+                    details={
+                        "capacity": previous.capacity,
+                        "current_jobs": previous.current_jobs,
+                    },
+                )
             worker = WorkerConnection(
                 node_id=node_id,
                 owner=owner,
@@ -123,6 +139,15 @@ class WorkerRegistry:
             )
             self._connections[node_id] = worker
             self._upsert_worker(worker, status="active", now=now)
+            log_kaggle_event(
+                "worker_registered",
+                owner=worker.owner,
+                backend=worker.model,
+                node_id=worker.node_id,
+                accelerator=worker.accelerator,
+                served_model=worker.model,
+                details={"capacity": worker.capacity},
+            )
             return worker
 
     async def unregister(
@@ -138,6 +163,20 @@ class WorkerRegistry:
             worker = self._connections.pop(node_id, None)
             if worker is not None:
                 await self._fail_pending_locked(worker, reason)
+                log_kaggle_event(
+                    "worker_disconnected",
+                    level="warning",
+                    owner=worker.owner,
+                    backend=worker.model,
+                    node_id=worker.node_id,
+                    accelerator=worker.accelerator,
+                    served_model=worker.model,
+                    message=reason,
+                    details={
+                        "capacity": worker.capacity,
+                        "current_jobs": worker.current_jobs,
+                    },
+                )
             now = time.time()
             with sqlite3.connect(self.database_path) as conn:
                 conn.execute(
@@ -173,6 +212,16 @@ class WorkerRegistry:
             worker = self._connections.get(node_id)
             if worker is None:
                 return False
+            log_kaggle_event(
+                "worker_terminate_requested",
+                owner=worker.owner,
+                backend=worker.model,
+                node_id=worker.node_id,
+                accelerator=worker.accelerator,
+                served_model=worker.model,
+                message=reason,
+                details={"capacity": worker.capacity, "current_jobs": worker.current_jobs},
+            )
             await worker.websocket.send_json(
                 {
                     "type": "terminate",
@@ -238,6 +287,18 @@ class WorkerRegistry:
             worker = self._connections.get(node_id)
             pending = worker.pending_jobs.get(job_id) if worker else None
             if pending is not None:
+                if message_type in {"job_error", "ocr_error"}:
+                    log_kaggle_event(
+                        "worker_job_error",
+                        level="error",
+                        owner=worker.owner,
+                        backend=worker.model,
+                        node_id=worker.node_id,
+                        accelerator=worker.accelerator,
+                        served_model=worker.model,
+                        message=str(message.get("error") or "worker failed"),
+                        details={"job_id": job_id, "message_type": message_type},
+                    )
                 await pending.queue.put(message)
 
     async def cleanup_stale(self) -> None:
@@ -349,12 +410,34 @@ class WorkerRegistry:
             worker = self._connections.get(node_id)
             pending = worker.pending_jobs.get(job_id) if worker else None
             if pending is not None:
+                log_kaggle_event(
+                    "gateway_worker_job_error",
+                    level="warning",
+                    owner=worker.owner,
+                    backend=worker.model,
+                    node_id=worker.node_id,
+                    accelerator=worker.accelerator,
+                    served_model=worker.model,
+                    message=reason,
+                    details={"job_id": job_id},
+                )
                 await pending.queue.put(
                     {"type": "job_error", "job_id": job_id, "error": reason}
                 )
 
     async def _fail_pending_locked(self, worker: WorkerConnection, reason: str) -> None:
         for pending in worker.pending_jobs.values():
+            log_kaggle_event(
+                "gateway_worker_job_error",
+                level="warning",
+                owner=worker.owner,
+                backend=worker.model,
+                node_id=worker.node_id,
+                accelerator=worker.accelerator,
+                served_model=worker.model,
+                message=reason,
+                details={"job_id": pending.job_id},
+            )
             await pending.queue.put(
                 {"type": "job_error", "job_id": pending.job_id, "error": reason}
             )

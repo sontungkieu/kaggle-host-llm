@@ -8,7 +8,9 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 
 from .chat_ui import CHAT_HTML
 from .dispatcher import Dispatcher
+from .kaggle_log import log_kaggle_event
 from .openai_models import ChatCompletionRequest
+from .ocr_models import OcrRequest
 from .registry import WorkerRegistry
 from .settings import Settings
 
@@ -123,11 +125,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return await dispatcher.complete(request)
 
+    @app.post("/v1/ocr")
+    async def ocr(
+        request: OcrRequest,
+        _: None = Depends(require_api_key),
+    ):
+        return await dispatcher.ocr(request)
+
     @app.websocket("/workers/connect")
     async def connect_worker(websocket: WebSocket) -> None:
         if resolved_settings.worker_token:
             token = websocket.query_params.get("token", "")
             if token != resolved_settings.worker_token:
+                log_kaggle_event(
+                    "worker_auth_failed",
+                    level="warning",
+                    message="worker websocket token mismatch",
+                )
                 await websocket.close(code=1008)
                 return
 
@@ -136,6 +150,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             register_message = await websocket.receive_json()
             if register_message.get("type") != "register":
+                log_kaggle_event(
+                    "worker_register_failed",
+                    level="warning",
+                    message="first message must be register",
+                    details={"message_type": register_message.get("type")},
+                )
                 await websocket.close(code=1003, reason="first message must be register")
                 return
             worker = await registry.register(websocket, register_message)
@@ -153,6 +173,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except WebSocketDisconnect:
             pass
         except ValueError as exc:
+            log_kaggle_event(
+                "worker_register_failed",
+                level="warning",
+                message=str(exc),
+            )
             await websocket.close(code=1003, reason=str(exc))
         finally:
             if worker is not None:

@@ -5,10 +5,12 @@ import json
 import sqlite3
 import threading
 
+import pytest
 from fastapi.testclient import TestClient
 
 from kaggle_host_llm.app import create_app
 from kaggle_host_llm.groq_client import GroqKeyPool, load_groq_keys
+from kaggle_host_llm.kaggle_log import log_kaggle_event, summarize
 from kaggle_host_llm.openai_models import (
     ChatCompletionChoice,
     ChatCompletionResponse,
@@ -21,6 +23,12 @@ from kaggle_host_llm.settings import Settings
 
 MODEL = "qwen2.5-9b-quantized"
 GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+OCR_MODEL = "paddleocr-ppstructurev3"
+
+
+@pytest.fixture(autouse=True)
+def isolate_kaggle_log(tmp_path, monkeypatch):
+    monkeypatch.setenv("KAGGLE_LOG_PATH", str(tmp_path / "kaggle.log"))
 
 
 class FakeGroqClient:
@@ -107,6 +115,24 @@ def register_worker(client: TestClient, *, token: str = ""):
     return websocket, ws
 
 
+def register_ocr_worker(client: TestClient, *, token: str = ""):
+    suffix = f"?token={token}" if token else ""
+    websocket = client.websocket_connect(f"/workers/connect{suffix}")
+    ws = websocket.__enter__()
+    ws.send_json(
+        {
+            "type": "register",
+            "node_id": "ocr-node-1",
+            "owner": "tester",
+            "model": OCR_MODEL,
+            "accelerator": "NvidiaTeslaT4x2",
+            "capacity": 1,
+        }
+    )
+    assert ws.receive_json()["type"] == "registered"
+    return websocket, ws
+
+
 def test_openai_request_validation_requires_user_message(tmp_path):
     with make_client(tmp_path) as client:
         response = client.post(
@@ -154,6 +180,136 @@ def test_streaming_dispatcher_returns_503_without_worker(tmp_path):
 
     assert response.status_code == 503
     assert "no healthy worker" in response.json()["detail"]
+
+
+def test_ocr_request_validation_requires_one_input(tmp_path):
+    with make_client(tmp_path) as client:
+        response = client.post("/v1/ocr", json={"model": OCR_MODEL})
+
+    assert response.status_code == 422
+
+
+def test_ocr_returns_503_without_worker(tmp_path):
+    with make_client(tmp_path) as client:
+        response = client.post(
+            "/v1/ocr",
+            json={"model": OCR_MODEL, "image_url": "https://example.com/doc.png"},
+        )
+
+    assert response.status_code == 503
+    assert "no healthy OCR worker" in response.json()["detail"]
+
+
+def test_ocr_routes_to_worker_and_returns_markdown(tmp_path):
+    with make_client(tmp_path, worker_token="secret") as client:
+        websocket_ctx, ws = register_ocr_worker(client, token="secret")
+        result = {}
+
+        def call_gateway():
+            result["response"] = client.post(
+                "/v1/ocr",
+                json={
+                    "model": OCR_MODEL,
+                    "image_base64": "aGVsbG8=",
+                    "filename": "doc.png",
+                    "return_format": "markdown",
+                },
+            )
+
+        thread = threading.Thread(target=call_gateway)
+        thread.start()
+        job = ws.receive_json()
+        assert job["type"] == "ocr_job"
+        assert job["model"] == OCR_MODEL
+        assert job["request"]["image_base64"] == "aGVsbG8="
+        ws.send_json(
+            {
+                "type": "ocr_done",
+                "job_id": job["job_id"],
+                "result": {
+                    "text": "hello",
+                    "markdown": "# hello",
+                    "pages": [{"index": 0, "markdown": "# hello"}],
+                    "data": {"pages": []},
+                    "metadata": {"backend": "fake"},
+                },
+            }
+        )
+        thread.join(timeout=5)
+        websocket_ctx.__exit__(None, None, None)
+
+    assert not thread.is_alive()
+    response = result["response"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == OCR_MODEL
+    assert body["text"] == "hello"
+    assert body["markdown"] == "# hello"
+    assert body["pages"][0]["index"] == 0
+    assert body["metadata"]["backend"] == "fake"
+
+
+def test_ocr_worker_error_returns_controlled_error(tmp_path):
+    with make_client(tmp_path) as client:
+        websocket_ctx, ws = register_ocr_worker(client)
+        result = {}
+
+        def call_gateway():
+            result["response"] = client.post(
+                "/v1/ocr",
+                json={"model": OCR_MODEL, "image_url": "https://example.com/doc.png"},
+            )
+
+        thread = threading.Thread(target=call_gateway)
+        thread.start()
+        job = ws.receive_json()
+        ws.send_json(
+            {
+                "type": "ocr_error",
+                "job_id": job["job_id"],
+                "error": "OCR failed",
+            }
+        )
+        thread.join(timeout=5)
+        websocket_ctx.__exit__(None, None, None)
+
+    assert not thread.is_alive()
+    assert result["response"].status_code == 502
+    assert "OCR failed" in result["response"].json()["detail"]
+
+
+def test_kaggle_log_records_owner_backend_and_occurrence(tmp_path):
+    log_file = tmp_path / "kaggle.log"
+    log_kaggle_event(
+        "observed_kaggle_issue",
+        level="error",
+        owner="kieutung",
+        backend="deepseek-ocr2",
+        node_id="ocr-node",
+        message="masked_scatter_: expected self and source to have same dtypes",
+    )
+    record = log_kaggle_event(
+        "observed_kaggle_issue",
+        level="error",
+        owner="kieutung",
+        backend="deepseek-ocr2",
+        node_id="ocr-node",
+        message="masked_scatter_: expected self and source to have same dtypes",
+    )
+
+    assert record["occurrence"] == 2
+    assert record["error_type"] == "deepseek_ocr_dtype_mismatch"
+    assert summarize(log_file) == [
+        (
+            (
+                "kieutung",
+                "deepseek-ocr2",
+                "observed_kaggle_issue",
+                "deepseek_ocr_dtype_mismatch",
+            ),
+            2,
+        )
+    ]
 
 
 def test_groq_key_file_loads_multiple_formats_and_round_robins(tmp_path):

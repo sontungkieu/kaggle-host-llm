@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
+from kaggle_event_log import log_kaggle_event
 from push_kaggle_worker import (
     DEFAULT_KAGGLE_ACCOUNTS,
     kaggle_command,
@@ -21,15 +22,55 @@ def run_kaggle(
     *,
     command_env: dict[str, str],
     capture: bool = False,
+    owner: str = "",
+    action: str = "",
+    kernel: str = "",
+    details: dict[str, object] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        check=True,
-        env=command_env,
-        text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.STDOUT if capture else None,
+    log_kaggle_event(
+        "kernel_manage_started",
+        owner=owner,
+        action=action,
+        kernel_id=kernel,
+        command=command,
+        details=details,
     )
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            env=command_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    except subprocess.CalledProcessError as exc:
+        if exc.stdout:
+            print(exc.stdout, end="", flush=True)
+        log_kaggle_event(
+            "kernel_manage_failed",
+            level="error",
+            owner=owner,
+            action=action,
+            kernel_id=kernel,
+            command=command,
+            message=exc.stdout or str(exc),
+            returncode=exc.returncode,
+            details=details,
+        )
+        raise
+    if not capture and result.stdout:
+        print(result.stdout, end="", flush=True)
+    log_kaggle_event(
+        "kernel_manage_succeeded",
+        owner=owner,
+        action=action,
+        kernel_id=kernel,
+        command=command,
+        message=result.stdout,
+        details=details,
+    )
+    return result
 
 
 def parse_kernel_refs(output: str, *, owner: str, prefix: str) -> list[str]:
@@ -75,7 +116,14 @@ def list_worker_kernel_refs(
         str(page_size),
         "--csv",
     ]
-    result = run_kaggle(command, command_env=command_env, capture=True)
+    result = run_kaggle(
+        command,
+        command_env=command_env,
+        capture=True,
+        owner=owner,
+        action="list_for_delete_workers",
+        details={"prefix": prefix, "page_size": page_size},
+    )
     return parse_kernel_refs(result.stdout or "", owner=owner, prefix=prefix)
 
 
@@ -142,6 +190,15 @@ def main() -> None:
     missing_owners = [owner for owner in owners if owner not in accounts]
     if missing_owners:
         available = ", ".join(sorted(accounts)) or "<none>"
+        for owner in missing_owners:
+            log_kaggle_event(
+                "account_not_found",
+                level="error",
+                owner=owner,
+                action=args.action,
+                message=f"Account {owner!r} not found.",
+                details={"available_accounts": sorted(accounts)},
+            )
         raise SystemExit(f"Account(s) not found: {', '.join(missing_owners)}. Available: {available}")
     if args.action in {"status", "logs", "delete"} and not args.kernel:
         raise SystemExit(f"{args.action} requires a kernel id, for example {args.owner}/slug")
@@ -170,18 +227,43 @@ def run_action(args: argparse.Namespace, *, owner: str, credential: dict[str, st
                 "--sort-by",
                 "dateRun",
             ]
-            run_kaggle(command, command_env=command_env)
+            run_kaggle(
+                command,
+                command_env=command_env,
+                owner=owner,
+                action=args.action,
+                details={"search": args.search},
+            )
         elif args.action == "status":
             command = [*kaggle_command(), "kernels", "status", args.kernel]
-            run_kaggle(command, command_env=command_env)
+            run_kaggle(
+                command,
+                command_env=command_env,
+                owner=owner,
+                action=args.action,
+                kernel=args.kernel or "",
+            )
         elif args.action == "logs":
             command = [*kaggle_command(), "kernels", "logs", args.kernel]
-            run_kaggle(command, command_env=command_env)
+            run_kaggle(
+                command,
+                command_env=command_env,
+                owner=owner,
+                action=args.action,
+                kernel=args.kernel or "",
+            )
         elif args.action == "delete":
             command = [*kaggle_command(), "kernels", "delete", args.kernel]
             if args.yes:
                 command.append("-y")
-            run_kaggle(command, command_env=command_env)
+            run_kaggle(
+                command,
+                command_env=command_env,
+                owner=owner,
+                action=args.action,
+                kernel=args.kernel or "",
+                details={"confirmed": args.yes},
+            )
         else:
             refs = list_worker_kernel_refs(
                 owner=owner,
@@ -191,8 +273,20 @@ def run_action(args: argparse.Namespace, *, owner: str, credential: dict[str, st
             )
             if not refs:
                 print(f"{owner}: no worker kernels matched prefix {args.prefix!r}", flush=True)
+                log_kaggle_event(
+                    "delete_workers_no_matches",
+                    owner=owner,
+                    action=args.action,
+                    details={"prefix": args.prefix, "page_size": args.page_size},
+                )
                 return
             print(f"{owner}: matched {len(refs)} worker kernel(s)", flush=True)
+            log_kaggle_event(
+                "delete_workers_matched",
+                owner=owner,
+                action=args.action,
+                details={"prefix": args.prefix, "matched_refs": refs, "confirmed": args.yes},
+            )
             for ref in refs:
                 print(f"  {ref}", flush=True)
             if not args.yes:
@@ -206,6 +300,10 @@ def run_action(args: argparse.Namespace, *, owner: str, credential: dict[str, st
                 run_kaggle(
                     [*kaggle_command(), "kernels", "delete", ref, "-y"],
                     command_env=command_env,
+                    owner=owner,
+                    action="delete-workers",
+                    kernel=ref,
+                    details={"prefix": args.prefix},
                 )
 
 

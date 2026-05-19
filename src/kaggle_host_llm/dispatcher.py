@@ -10,6 +10,7 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from .groq_client import GroqClient, parse_groq_route
+from .kaggle_log import log_kaggle_event
 from .openai_models import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -20,6 +21,7 @@ from .openai_models import (
     estimate_usage,
     message_has_image,
 )
+from .ocr_models import OcrRequest, OcrResponse
 from .registry import WorkerRegistry
 
 
@@ -69,11 +71,33 @@ class Dispatcher:
                     worker_usage = parse_worker_usage(message)
                     break
                 elif message_type == "job_error":
+                    log_kaggle_event(
+                        "chat_worker_job_error",
+                        level="error",
+                        owner=worker.owner,
+                        backend=worker.model,
+                        node_id=worker.node_id,
+                        accelerator=worker.accelerator,
+                        served_model=worker.model,
+                        message=str(message.get("error") or "worker failed"),
+                        details={"job_id": job_id},
+                    )
                     raise HTTPException(
                         status_code=status.HTTP_502_BAD_GATEWAY,
                         detail=str(message.get("error") or "worker failed"),
                     )
         except TimeoutError as exc:
+            log_kaggle_event(
+                "chat_worker_timeout",
+                level="error",
+                owner=worker.owner,
+                backend=worker.model,
+                node_id=worker.node_id,
+                accelerator=worker.accelerator,
+                served_model=worker.model,
+                message="worker job timed out",
+                details={"job_id": job_id},
+            )
             await self.registry.fail_worker(worker.node_id, job_id, "job timed out")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
@@ -157,6 +181,17 @@ class Dispatcher:
                         yield "data: [DONE]\n\n"
                         break
             except TimeoutError:
+                log_kaggle_event(
+                    "chat_worker_timeout",
+                    level="error",
+                    owner=worker.owner,
+                    backend=worker.model,
+                    node_id=worker.node_id,
+                    accelerator=worker.accelerator,
+                    served_model=worker.model,
+                    message="worker job timed out",
+                    details={"job_id": job_id},
+                )
                 payload = {
                     "error": {
                         "message": "worker job timed out",
@@ -170,9 +205,83 @@ class Dispatcher:
 
         return events()
 
+    async def ocr(self, request: OcrRequest) -> OcrResponse:
+        job_id, worker, pending = await self._send_ocr_job(request)
+        try:
+            while True:
+                message = await asyncio.wait_for(
+                    pending.queue.get(), timeout=self.job_timeout_seconds
+                )
+                message_type = message.get("type")
+                if message_type in {"ocr_done", "job_done"}:
+                    result = message.get("result")
+                    if not isinstance(result, dict):
+                        result = {
+                            "text": str(message.get("content") or ""),
+                            "markdown": str(message.get("content") or ""),
+                        }
+                    return OcrResponse(
+                        model=request.model,
+                        text=str(result.get("text") or ""),
+                        markdown=str(result.get("markdown") or ""),
+                        data=result.get("data") if isinstance(result.get("data"), dict) else {},
+                        pages=(
+                            result.get("pages")
+                            if isinstance(result.get("pages"), list)
+                            else []
+                        ),
+                        metadata=(
+                            result.get("metadata")
+                            if isinstance(result.get("metadata"), dict)
+                            else {}
+                        ),
+                    )
+                if message_type in {"ocr_error", "job_error"}:
+                    log_kaggle_event(
+                        "ocr_worker_job_error",
+                        level="error",
+                        owner=worker.owner,
+                        backend=worker.model,
+                        node_id=worker.node_id,
+                        accelerator=worker.accelerator,
+                        served_model=worker.model,
+                        message=str(message.get("error") or "OCR worker failed"),
+                        details={"job_id": job_id, "message_type": message_type},
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=str(message.get("error") or "OCR worker failed"),
+                    )
+        except TimeoutError as exc:
+            log_kaggle_event(
+                "ocr_worker_timeout",
+                level="error",
+                owner=worker.owner,
+                backend=worker.model,
+                node_id=worker.node_id,
+                accelerator=worker.accelerator,
+                served_model=worker.model,
+                message="OCR job timed out",
+                details={"job_id": job_id},
+            )
+            await self.registry.fail_worker(worker.node_id, job_id, "OCR job timed out")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="OCR worker job timed out",
+            ) from exc
+        finally:
+            await self.registry.release_job(worker.node_id, job_id)
+
     async def _send_job(self, request: ChatCompletionRequest) -> tuple[str, Any, Any]:
         worker = await self.registry.select_worker(request.model)
         if worker is None:
+            log_kaggle_event(
+                "no_worker_available",
+                level="warning",
+                backend=request.model,
+                served_model=request.model,
+                message=f"no healthy worker is available for model {request.model}",
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"no healthy worker is available for model {request.model}",
@@ -196,9 +305,66 @@ class Dispatcher:
         except Exception as exc:
             await self.registry.release_job(worker.node_id, job_id)
             await self.registry.unregister(worker.node_id, reason="worker send failed")
+            log_kaggle_event(
+                "worker_send_failed",
+                level="error",
+                owner=worker.owner,
+                backend=worker.model,
+                node_id=worker.node_id,
+                accelerator=worker.accelerator,
+                served_model=worker.model,
+                message=repr(exc),
+                details={"job_id": job_id},
+            )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="failed to send job to worker",
+            ) from exc
+        return job_id, worker, pending
+
+    async def _send_ocr_job(self, request: OcrRequest) -> tuple[str, Any, Any]:
+        worker = await self.registry.select_worker(request.model)
+        if worker is None:
+            log_kaggle_event(
+                "no_ocr_worker_available",
+                level="warning",
+                backend=request.model,
+                served_model=request.model,
+                message=f"no healthy OCR worker is available for model {request.model}",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"no healthy OCR worker is available for model {request.model}",
+            )
+
+        job_id = f"ocr-job-{uuid.uuid4().hex}"
+        pending = await self.registry.reserve_job(worker, job_id)
+        payload = {
+            "type": "ocr_job",
+            "job_id": job_id,
+            "model": request.model,
+            "request": request.worker_payload(),
+            "timeout": self.job_timeout_seconds,
+        }
+        try:
+            await worker.websocket.send_json(payload)
+        except Exception as exc:
+            await self.registry.release_job(worker.node_id, job_id)
+            await self.registry.unregister(worker.node_id, reason="OCR worker send failed")
+            log_kaggle_event(
+                "ocr_worker_send_failed",
+                level="error",
+                owner=worker.owner,
+                backend=worker.model,
+                node_id=worker.node_id,
+                accelerator=worker.accelerator,
+                served_model=worker.model,
+                message=repr(exc),
+                details={"job_id": job_id},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="failed to send OCR job to worker",
             ) from exc
         return job_id, worker, pending
 

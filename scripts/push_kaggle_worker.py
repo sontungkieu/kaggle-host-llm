@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import urlopen
 
+from kaggle_event_log import log_kaggle_event
 from stage_kaggle_worker import stage_worker
 
 
@@ -115,14 +116,34 @@ def wait_for_active_worker(
     served_model: str,
     timeout_seconds: int,
     poll_interval_seconds: int,
+    backend: str = "",
+    kernel_id: str = "",
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
             if gateway_has_worker(health_url, owner, served_model):
+                log_kaggle_event(
+                    "worker_registered",
+                    owner=owner,
+                    backend=backend,
+                    kernel_id=kernel_id,
+                    served_model=served_model,
+                    details={"health_url": health_url},
+                )
                 print("Gateway reports the Kaggle worker as active.", flush=True)
                 return
         except Exception as exc:
+            log_kaggle_event(
+                "gateway_health_check_failed",
+                level="warning",
+                owner=owner,
+                backend=backend,
+                kernel_id=kernel_id,
+                served_model=served_model,
+                message=repr(exc),
+                details={"health_url": health_url},
+            )
             print(f"Gateway health check not ready: {exc}", flush=True)
         print(
             f"Waiting for worker registration at {health_url} "
@@ -130,9 +151,22 @@ def wait_for_active_worker(
             flush=True,
         )
         time.sleep(poll_interval_seconds)
-    raise SystemExit(
-        "Timed out waiting for an active worker. Check the Kaggle notebook logs."
+    message = "Timed out waiting for an active worker. Check the Kaggle notebook logs."
+    log_kaggle_event(
+        "worker_registration_timeout",
+        level="error",
+        owner=owner,
+        backend=backend,
+        kernel_id=kernel_id,
+        served_model=served_model,
+        message=message,
+        details={
+            "health_url": health_url,
+            "timeout_seconds": timeout_seconds,
+            "poll_interval_seconds": poll_interval_seconds,
+        },
     )
+    raise SystemExit(message)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -273,6 +307,13 @@ def main() -> None:
     credential = accounts.get(args.owner)
     if credential is None:
         available = ", ".join(sorted(accounts)) or "<none>"
+        log_kaggle_event(
+            "account_not_found",
+            level="error",
+            owner=args.owner,
+            message=f"Account {args.owner!r} not found.",
+            details={"available_accounts": sorted(accounts)},
+        )
         raise SystemExit(f"Account {args.owner!r} not found. Available: {available}")
 
     gateway_ws_url = args.gateway_ws_url or env_values.get("GATEWAY_WS_URL", "")
@@ -340,9 +381,27 @@ def main() -> None:
     )
     print(f"Created staging folder: {staging_dir}", flush=True)
     print(f"Kernel id: {kernel_id}", flush=True)
+    log_kaggle_event(
+        "kernel_staged",
+        owner=args.owner,
+        backend=worker_backend,
+        kernel_id=kernel_id,
+        staging_dir=staging_dir,
+        accelerator=accelerator,
+        served_model=served_model,
+    )
 
     if args.dry_run:
         print("Dry run: skipped kaggle kernels push/status.", flush=True)
+        log_kaggle_event(
+            "dry_run",
+            owner=args.owner,
+            backend=worker_backend,
+            kernel_id=kernel_id,
+            staging_dir=staging_dir,
+            accelerator=accelerator,
+            served_model=served_model,
+        )
         return
 
     with tempfile.TemporaryDirectory(prefix="kaggle-config-") as config_dir:
@@ -361,16 +420,57 @@ def main() -> None:
             "--accelerator",
             accelerator,
         ]
-        push_result = subprocess.run(
-            push_cmd,
-            check=True,
-            env=command_env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+        log_kaggle_event(
+            "kernel_push_started",
+            owner=args.owner,
+            backend=worker_backend,
+            kernel_id=kernel_id,
+            staging_dir=staging_dir,
+            accelerator=accelerator,
+            served_model=served_model,
+            command=push_cmd,
         )
+        try:
+            push_result = subprocess.run(
+                push_cmd,
+                check=True,
+                env=command_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        except subprocess.CalledProcessError as exc:
+            output = exc.stdout or ""
+            if output:
+                print(output, end="", flush=True)
+            log_kaggle_event(
+                "kernel_push_failed",
+                level="error",
+                owner=args.owner,
+                backend=worker_backend,
+                kernel_id=kernel_id,
+                staging_dir=staging_dir,
+                accelerator=accelerator,
+                served_model=served_model,
+                command=push_cmd,
+                message=output or str(exc),
+                returncode=exc.returncode,
+            )
+            raise SystemExit(f"Kaggle push failed with exit code {exc.returncode}.") from exc
         print(push_result.stdout, end="", flush=True)
         if "Kernel push error:" in push_result.stdout:
+            log_kaggle_event(
+                "kernel_push_rejected",
+                level="error",
+                owner=args.owner,
+                backend=worker_backend,
+                kernel_id=kernel_id,
+                staging_dir=staging_dir,
+                accelerator=accelerator,
+                served_model=served_model,
+                command=push_cmd,
+                message=push_result.stdout,
+            )
             raise SystemExit(
                 "Kaggle rejected the push. If the message says the maximum GPU "
                 "session count was reached, delete or stop old worker kernels, "
@@ -382,8 +482,64 @@ def main() -> None:
             actual_kernel_id = f"{match.group(1)}/{match.group(2)}"
             if actual_kernel_id != kernel_id:
                 print(f"Kaggle resolved kernel id: {actual_kernel_id}", flush=True)
+        log_kaggle_event(
+            "kernel_push_succeeded",
+            owner=args.owner,
+            backend=worker_backend,
+            kernel_id=actual_kernel_id,
+            staging_dir=staging_dir,
+            accelerator=accelerator,
+            served_model=served_model,
+            command=push_cmd,
+            message=push_result.stdout,
+        )
         status_cmd = [*kaggle_command(), "kernels", "status", actual_kernel_id]
-        subprocess.run(status_cmd, check=True, env=command_env)
+        log_kaggle_event(
+            "kernel_status_started",
+            owner=args.owner,
+            backend=worker_backend,
+            kernel_id=actual_kernel_id,
+            accelerator=accelerator,
+            served_model=served_model,
+            command=status_cmd,
+        )
+        try:
+            status_result = subprocess.run(
+                status_cmd,
+                check=True,
+                env=command_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        except subprocess.CalledProcessError as exc:
+            output = exc.stdout or ""
+            if output:
+                print(output, end="", flush=True)
+            log_kaggle_event(
+                "kernel_status_failed",
+                level="error",
+                owner=args.owner,
+                backend=worker_backend,
+                kernel_id=actual_kernel_id,
+                accelerator=accelerator,
+                served_model=served_model,
+                command=status_cmd,
+                message=output or str(exc),
+                returncode=exc.returncode,
+            )
+            raise
+        print(status_result.stdout, end="", flush=True)
+        log_kaggle_event(
+            "kernel_status_succeeded",
+            owner=args.owner,
+            backend=worker_backend,
+            kernel_id=actual_kernel_id,
+            accelerator=accelerator,
+            served_model=served_model,
+            command=status_cmd,
+            message=status_result.stdout,
+        )
         if args.wait_active:
             health_url = (
                 args.gateway_health_url
@@ -396,6 +552,8 @@ def main() -> None:
                 served_model=served_model,
                 timeout_seconds=args.wait_timeout,
                 poll_interval_seconds=args.poll_interval,
+                backend=worker_backend,
+                kernel_id=actual_kernel_id,
             )
 
 

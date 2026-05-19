@@ -6,6 +6,8 @@ The gateway runs on an always-on host and is exposed through Cloudflare Tunnel. 
 
 This project is intentionally best-effort. Kaggle notebooks have session, accelerator, quota, and policy limits, so this is not a 24/24 production cluster design and it must not be used to bypass account/resource restrictions.
 
+Operational notes, troubleshooting history, and current known-good commands are collected in [docs/kaggle_worker_runbook.md](docs/kaggle_worker_runbook.md).
+
 ## Install
 
 ```bash
@@ -51,6 +53,16 @@ VLLM_TENSOR_PARALLEL_SIZE=auto
 VLLM_MAX_MODEL_LEN=4096
 VLLM_GPU_MEMORY_UTILIZATION=0.88
 VLLM_DTYPE=auto
+OCR_MODEL=paddleocr-ppstructurev3
+OCR_CAPACITY=1
+PADDLEOCR_DEVICE=auto
+PADDLEOCR_LANG=
+DEEPSEEK_OCR_MODEL_ID=deepseek-ai/DeepSeek-OCR-2
+DEEPSEEK_OCR_PROMPT=<image>\n<|grounding|>Convert the document to markdown.
+DEEPSEEK_OCR_BASE_SIZE=1024
+DEEPSEEK_OCR_IMAGE_SIZE=768
+DEEPSEEK_OCR_CROP_MODE=true
+DEEPSEEK_OCR_DTYPE=float16
 ```
 
 The app automatically loads `.secrets/.env` and `.env` when present. Keep real secrets in `.secrets/.env`; the `.secrets/` folder is ignored by git.
@@ -221,6 +233,60 @@ For images, use a Groq vision model and OpenAI content parts:
 
 Image requests without a `groq:<vision-model>` prefix are rejected with HTTP 400 because the current Kaggle worker path is text-only.
 
+### OCR
+
+OCR uses the same root gateway and outbound Kaggle worker WebSocket model as chat. Start one or more OCR notebooks, then call:
+
+```bash
+curl http://localhost:8000/v1/ocr \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $GATEWAY_API_KEY" \
+  -d '{
+    "model": "paddleocr-ppstructurev3",
+    "image_url": "https://example.com/document.png",
+    "return_format": "markdown"
+  }'
+```
+
+You can also send inline base64:
+
+```json
+{
+  "model": "paddleocr-ppstructurev3",
+  "image_base64": "iVBORw0KGgo...",
+  "filename": "document.png",
+  "mime_type": "image/png",
+  "return_format": "all"
+}
+```
+
+Supported inputs are exactly one of `image_url`, `image_base64`, `document_url`, or `document_base64`. URLs can be `http(s)` URLs or `data:` URLs. The response shape is:
+
+```json
+{
+  "object": "ocr.result",
+  "model": "paddleocr-ppstructurev3",
+  "text": "...",
+  "markdown": "...",
+  "pages": [],
+  "data": {},
+  "metadata": {}
+}
+```
+
+Initial worker models:
+
+- `paddleocr-ppstructurev3`: PaddleOCR PP-StructureV3 document parsing; returns Markdown plus page JSON when available.
+- `deepseek-ocr2`: DeepSeek-OCR-2 template; uses the model's `infer()` path to convert an image to Markdown.
+
+Quick OCR pipeline test:
+
+```bash
+uv run python scripts/test_ocr_pipeline.py \
+  --model paddleocr-ppstructurev3 \
+  --image-file ./document.png
+```
+
 ## Kaggle Worker
 
 The notebook template is [notebooks/kaggle_qwen_worker.ipynb](notebooks/kaggle_qwen_worker.ipynb). Set these variables in the Kaggle notebook environment or edit the setup cell:
@@ -275,6 +341,19 @@ uv run python scripts/push_kaggle_worker.py <kaggle-username> \
 
 The wrapper creates a temporary `KAGGLE_CONFIG_DIR`, writes that account's `kaggle.json` outside the repo, runs `kaggle kernels push`, checks `kaggle kernels status`, and removes the temporary credential directory when done. The Kaggle notebook itself contains a long-running reconnect loop; the local wrapper does not need to stay attached for the notebook to keep running.
 
+The gateway and Kaggle wrapper commands append structured local events to `kaggle.log`. The file is JSONL, ignored by git, and contains timestamp, account, backend/model, node id or kernel id, command/runtime phase, error type, message, and `occurrence` count for repeated warnings/errors. Runtime events include worker registration, disconnects, heartbeat timeouts, root termination requests, send failures, and worker job errors. To change the path:
+
+```bash
+KAGGLE_LOG_PATH=data/logs/kaggle.log uv run python scripts/push_kaggle_worker.py <kaggle-username>
+```
+
+To inspect recent events or grouped counts:
+
+```bash
+uv run python scripts/kaggle_event_log.py --tail 20
+uv run python scripts/kaggle_event_log.py
+```
+
 To keep the local command open until the gateway sees the worker:
 
 ```bash
@@ -321,6 +400,37 @@ uv run python scripts/push_kaggle_worker.py <kaggle-username> --dry-run
 ```
 
 The staging folder contains the notebook, `kernel-metadata.json`, and optional `worker_config.json` for runtime worker settings. Keep Kaggle API tokens outside the repo; `.secrets/all-kaggle.json` is ignored by git.
+
+## Kaggle OCR Workers
+
+PaddleOCR PP-StructureV3 worker:
+
+```bash
+uv run python scripts/push_kaggle_ocr_worker.py <kaggle-username> \
+  --backend paddleocr-ppstructurev3 \
+  --wait-active
+```
+
+DeepSeek-OCR-2 worker:
+
+```bash
+uv run python scripts/push_kaggle_ocr_worker.py <kaggle-username> \
+  --backend deepseek-ocr2 \
+  --served-model deepseek-ocr2 \
+  --wait-active
+```
+
+Dry-run staging only:
+
+```bash
+uv run python scripts/push_kaggle_ocr_worker.py <kaggle-username> \
+  --backend paddleocr-ppstructurev3 \
+  --dry-run
+```
+
+The OCR notebooks are [notebooks/kaggle_paddleocr_worker.ipynb](notebooks/kaggle_paddleocr_worker.ipynb) and [notebooks/kaggle_deepseek_ocr2_worker.ipynb](notebooks/kaggle_deepseek_ocr2_worker.ipynb). Both register via `/workers/connect` and listen for `ocr_job` envelopes. Use `OCR_MODEL` to override the registered model name, `OCR_CAPACITY` for concurrency, and `KAGGLE_ACCELERATOR=NvidiaTeslaT4` for T4-backed Kaggle sessions.
+
+For PaddleOCR, `PADDLEOCR_DEVICE=auto` maps T4x2 to `gpu:0,1`; set it explicitly if Paddle reports device issues. For DeepSeek-OCR-2 on T4, the template defaults to `DEEPSEEK_OCR_DTYPE=float16` and applies a small dtype-safe scatter patch because the model's remote inference path can produce mixed float32/float16 image embeddings.
 
 ## Tests
 
