@@ -216,6 +216,18 @@ curl -X POST http://127.0.0.1:8000/workers/<node_id>/terminate \
 
 Important: root termination stops the WebSocket worker loop, but it may not immediately free Kaggle GPU session quota. Delete old Kaggle kernels when Kaggle reports maximum GPU session count.
 
+If `/health` already shows two active GPU workers for the same Kaggle account, pushing another GPU notebook on that account usually fails with:
+
+```text
+Kernel push error: Maximum batch GPU session count of 2 reached.
+```
+
+That is an operational limit, not a gateway bug. Decide first:
+
+- If the current workers are good, do not push duplicates.
+- If replacing a worker, delete the old Kaggle kernel prefix first, then push the new worker.
+- If you need extra capacity, push from a different Kaggle account that still has GPU quota.
+
 ## Cleanup Old Kaggle Kernels
 
 Dry-run list:

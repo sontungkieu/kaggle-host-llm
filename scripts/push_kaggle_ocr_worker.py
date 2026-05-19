@@ -275,6 +275,24 @@ def main() -> None:
             )
             raise SystemExit(f"Kaggle push failed with exit code {exc.returncode}.") from exc
         print(push_result.stdout, end="", flush=True)
+        if "Kernel push error:" in push_result.stdout:
+            log_kaggle_event(
+                "ocr_kernel_push_rejected",
+                level="error",
+                owner=args.owner,
+                backend=args.backend,
+                kernel_id=kernel_id,
+                staging_dir=staging_dir,
+                accelerator=accelerator,
+                served_model=served_model,
+                command=push_cmd,
+                message=push_result.stdout,
+            )
+            raise SystemExit(
+                "Kaggle rejected the OCR push. If the message says the maximum GPU "
+                "session count was reached, delete or stop old OCR worker kernels, "
+                "then push again."
+            )
         actual_kernel_id = kernel_id
         match = KAGGLE_CODE_URL_RE.search(push_result.stdout)
         if match:

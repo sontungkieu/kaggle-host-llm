@@ -432,6 +432,21 @@ The OCR notebooks are [notebooks/kaggle_paddleocr_worker.ipynb](notebooks/kaggle
 
 For PaddleOCR, `PADDLEOCR_DEVICE=auto` maps T4x2 to `gpu:0,1`; set it explicitly if Paddle reports device issues. For DeepSeek-OCR-2 on T4, the template defaults to `DEEPSEEK_OCR_DTYPE=float16` and applies a small dtype-safe scatter patch because the model's remote inference path can produce mixed float32/float16 image embeddings.
 
+If Kaggle reports `Maximum batch GPU session count of 2 reached`, that account already has two GPU sessions. Keep the current workers if they are healthy, push from another account, or delete old kernels first:
+
+```bash
+uv run python scripts/manage_kaggle_kernel.py <kaggle-username> delete-workers \
+  --prefix kaggle-paddleocr-worker \
+  --page-size 50
+
+uv run python scripts/manage_kaggle_kernel.py <kaggle-username> delete-workers \
+  --prefix kaggle-paddleocr-worker \
+  --page-size 50 \
+  --yes
+```
+
+Use `--prefix kaggle-deepseek-ocr2-worker` for DeepSeek OCR2 cleanup.
+
 ## Tests
 
 ```bash
